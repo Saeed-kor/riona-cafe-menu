@@ -5,8 +5,11 @@
   "description": "Backend API for Riona Cafe Menu",
   "main": "src/server.js",
   "scripts": {
+    "admin:create": "node src/scripts/createAdmin.js",
+    "db:migrate": "node src/db/migrate.js",
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",

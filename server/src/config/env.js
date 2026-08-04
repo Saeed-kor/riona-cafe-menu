@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const envFilePath = fileURLToPath(new URL('../../.env', import.meta.url));
@@ -53,7 +54,78 @@ function parseClientUrl(value) {
   return url.origin;
 }
 
+function parseNodeEnvironment(value) {
+  const normalizedValue = value?.trim() || 'development';
+
+  if (!['development', 'test', 'production'].includes(normalizedValue)) {
+    throw new Error(
+      'Invalid environment variable: NODE_ENV must be development, test, or production.',
+    );
+  }
+
+  return normalizedValue;
+}
+
+function isValidProxyAddress(value) {
+  const separatorIndex = value.lastIndexOf('/');
+
+  if (separatorIndex === -1) {
+    return isIP(value) !== 0;
+  }
+
+  const address = value.slice(0, separatorIndex);
+  const prefix = value.slice(separatorIndex + 1);
+  const addressVersion = isIP(address);
+
+  if (addressVersion === 0 || !/^\d+$/.test(prefix)) {
+    return false;
+  }
+
+  const maximumPrefix = addressVersion === 4 ? 32 : 128;
+  return Number(prefix) <= maximumPrefix;
+}
+
+export function parseTrustProxy(value) {
+  const normalizedValue = value?.trim() || 'false';
+
+  if (normalizedValue.toLowerCase() === 'false') {
+    return false;
+  }
+
+  if (normalizedValue.toLowerCase() === 'true') {
+    throw new Error(
+      'Invalid environment variable: TRUST_PROXY must not grant trust to every proxy.',
+    );
+  }
+
+  if (/^\d+$/.test(normalizedValue)) {
+    const hopCount = Number(normalizedValue);
+
+    if (!Number.isSafeInteger(hopCount) || hopCount > 255) {
+      throw new Error(
+        'Invalid environment variable: TRUST_PROXY hop count must be between 0 and 255.',
+      );
+    }
+
+    return hopCount;
+  }
+
+  const trustedAddresses = normalizedValue.split(',').map((entry) => entry.trim());
+
+  if (
+    trustedAddresses.some((entry) => entry === '' || !isValidProxyAddress(entry))
+  ) {
+    throw new Error(
+      'Invalid environment variable: TRUST_PROXY must contain only proxy IP or CIDR values.',
+    );
+  }
+
+  return Object.freeze(trustedAddresses);
+}
+
 export const env = Object.freeze({
+  NODE_ENV: parseNodeEnvironment(process.env.NODE_ENV),
+  TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
   PORT: parsePort('PORT', requireNonEmpty('PORT')),
   CLIENT_URL: parseClientUrl(requireNonEmpty('CLIENT_URL')),
   DB_HOST: requireNonEmpty('DB_HOST'),

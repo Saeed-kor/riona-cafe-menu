@@ -1,3 +1,4 @@
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
@@ -5,26 +6,45 @@ import helmet from 'helmet';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
+import { createAdminAuthRouter } from './routes/adminAuth.routes.js';
 import healthRouter from './routes/health.routes.js';
 
-const app = express();
+export function createApp({
+  adminAuthService,
+  loginLimiter,
+  trustProxy = env.TRUST_PROXY,
+} = {}) {
+  const app = express();
 
-app.disable('x-powered-by');
-app.use(helmet());
-app.use(
-  cors({
-    origin(requestOrigin, callback) {
-      const isAllowed = !requestOrigin || requestOrigin === env.CLIENT_URL;
-      callback(null, isAllowed);
-    },
-    credentials: true,
-  }),
-);
-app.use(express.json({ limit: '100kb' }));
+  app.disable('x-powered-by');
+  app.set('trust proxy', trustProxy);
+  app.use(helmet());
+  app.use(
+    cors({
+      origin(requestOrigin, callback) {
+        const isAllowed = !requestOrigin || requestOrigin === env.CLIENT_URL;
+        callback(null, isAllowed);
+      },
+      credentials: true,
+    }),
+  );
+  app.use(express.json({ limit: '100kb' }));
+  app.use(cookieParser());
 
-app.use('/api/health', healthRouter);
+  app.use(
+    '/api/admin/auth',
+    createAdminAuthRouter({
+      authService: adminAuthService,
+      isProduction: env.NODE_ENV === 'production',
+      loginLimiter,
+    }),
+  );
+  app.use('/api/health', healthRouter);
 
-app.use(notFound);
-app.use(errorHandler);
+  app.use(notFound);
+  app.use(errorHandler);
 
-export { app };
+  return app;
+}
+
+export const app = createApp();

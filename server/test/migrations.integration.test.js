@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 
 import { up, validateCoreSchema } from '../src/db/migrations/001_create_core_tables.js';
+import { validateAdminSessionsSchema } from '../src/db/migrations/002_create_admin_sessions.js';
 import {
   authorizeIntegrationDatabase,
   releaseIntegrationDatabaseLock,
@@ -59,7 +60,14 @@ async function resetTestSchema(connection) {
   let resetError = null;
 
   try {
-    for (const tableName of ['menu_items', 'categories', 'admins', 'cafe_settings', 'schema_migrations']) {
+    for (const tableName of [
+      'admin_sessions',
+      'menu_items',
+      'categories',
+      'admins',
+      'cafe_settings',
+      'schema_migrations',
+    ]) {
       await connection.query(`DROP TABLE IF EXISTS ${tableName}`);
     }
   } catch (error) {
@@ -87,6 +95,11 @@ async function assertCoreSchemaRejected(connection) {
 async function countAppliedMigrations(connection) {
   const [[row]] = await connection.query('SELECT COUNT(*) AS migrationCount FROM schema_migrations');
   return Number(row.migrationCount);
+}
+
+async function readAppliedMigrationIds(connection) {
+  const [rows] = await connection.query('SELECT id FROM schema_migrations ORDER BY id');
+  return rows.map((row) => row.id);
 }
 
 function runMigrationProcess() {
@@ -340,7 +353,12 @@ test(
 
       assert.equal(firstRun.code, 0);
       assert.equal(secondRun.code, 0);
-      assert.equal(await countAppliedMigrations(connection), 1);
+      assert.deepEqual(await readAppliedMigrationIds(connection), [
+        '001_create_core_tables',
+        '002_create_admin_sessions',
+      ]);
+      await validateCoreSchema(connection, testDatabaseName, false);
+      await validateAdminSessionsSchema(connection, testDatabaseName, false);
     });
 
     await context.test('serializes two concurrent migration runners', async () => {
@@ -351,7 +369,11 @@ test(
         results.map((result) => result.code),
         [0, 0],
       );
-      assert.equal(await countAppliedMigrations(connection), 1);
+      assert.deepEqual(await readAppliedMigrationIds(connection), [
+        '001_create_core_tables',
+        '002_create_admin_sessions',
+      ]);
+      await validateAdminSessionsSchema(connection, testDatabaseName, false);
     });
     } catch (error) {
       primaryError = error;

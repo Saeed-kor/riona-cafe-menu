@@ -10,6 +10,10 @@ import mysql from 'mysql2/promise';
 import { up, validateCoreSchema } from '../src/db/migrations/001_create_core_tables.js';
 import { validateAdminSessionsSchema } from '../src/db/migrations/002_create_admin_sessions.js';
 import {
+  up as enforceUniqueCategoryNames,
+  validateCategoryManagementSchema,
+} from '../src/db/migrations/003_enforce_unique_category_names.js';
+import {
   authorizeIntegrationDatabase,
   releaseIntegrationDatabaseLock,
   runFailSafeCleanup,
@@ -346,6 +350,99 @@ test(
       }
     });
 
+    await context.test('enforces target collation across a drifted category-name column', async () => {
+      await resetTestSchema(connection);
+      await up(connection, { databaseName: testDatabaseName });
+      await connection.query(
+        `ALTER TABLE categories
+           MODIFY COLUMN name VARCHAR(100)
+           CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL`,
+      );
+      await connection.execute(
+        'INSERT INTO categories (name) VALUES (?), (?)',
+        ['Cafe', 'CAFÉ'],
+      );
+
+      await assert.rejects(
+        enforceUniqueCategoryNames(connection, { databaseName: testDatabaseName }),
+        (error) => error.code === 'DUPLICATE_CATEGORY_NAMES_EXIST',
+      );
+
+      const [[columnAfterRejection]] = await connection.execute(
+        `SELECT CHARACTER_SET_NAME AS characterSet, COLLATION_NAME AS collation
+           FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = 'categories'
+            AND COLUMN_NAME = 'name'`,
+        [testDatabaseName],
+      );
+      const [indexesAfterRejection] = await connection.execute(
+        `SELECT INDEX_NAME AS indexName, SUB_PART AS subPart
+           FROM INFORMATION_SCHEMA.STATISTICS
+          WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = 'categories'
+            AND INDEX_NAME = 'uq_categories_name'`,
+        [testDatabaseName],
+      );
+
+      assert.equal(columnAfterRejection.characterSet, 'utf8mb4');
+      assert.equal(columnAfterRejection.collation, 'utf8mb4_bin');
+      assert.equal(indexesAfterRejection.length, 0);
+
+      await connection.execute('DELETE FROM categories WHERE name = ?', ['CAFÉ']);
+      await enforceUniqueCategoryNames(connection, { databaseName: testDatabaseName });
+      await validateCategoryManagementSchema(connection, testDatabaseName, false);
+
+      await assert.rejects(
+        connection.execute('INSERT INTO categories (name) VALUES (?)', ['CAFÉ']),
+        (error) => error.code === 'ER_DUP_ENTRY',
+      );
+    });
+
+    await context.test('replaces a same-name prefix index with a full-column unique index', async () => {
+      await resetTestSchema(connection);
+      await up(connection, { databaseName: testDatabaseName });
+      await connection.query(
+        `ALTER TABLE categories
+           ADD UNIQUE KEY uq_categories_name (name(10))`,
+      );
+
+      await enforceUniqueCategoryNames(connection, { databaseName: testDatabaseName });
+
+      const [indexRows] = await connection.execute(
+        `SELECT INDEX_NAME AS indexName, NON_UNIQUE AS nonUnique,
+                SEQ_IN_INDEX AS sequenceNumber, COLUMN_NAME AS columnName,
+                SUB_PART AS subPart
+           FROM INFORMATION_SCHEMA.STATISTICS
+          WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = 'categories'
+            AND INDEX_NAME = 'uq_categories_name'
+          ORDER BY SEQ_IN_INDEX`,
+        [testDatabaseName],
+      );
+
+      assert.equal(indexRows.length, 1);
+      assert.equal(indexRows[0].indexName, 'uq_categories_name');
+      assert.equal(Number(indexRows[0].nonUnique), 0);
+      assert.equal(Number(indexRows[0].sequenceNumber), 1);
+      assert.equal(indexRows[0].columnName, 'name');
+      assert.equal(indexRows[0].subPart, null);
+
+      const firstName = '1234567890-alpha';
+      const secondName = '1234567890-beta';
+      await connection.execute('INSERT INTO categories (name) VALUES (?), (?)', [
+        firstName,
+        secondName,
+      ]);
+      await assert.rejects(
+        connection.execute('INSERT INTO categories (name) VALUES (?)', [firstName]),
+        (error) => error.code === 'ER_DUP_ENTRY',
+      );
+
+      await enforceUniqueCategoryNames(connection, { databaseName: testDatabaseName });
+      await validateCategoryManagementSchema(connection, testDatabaseName, false);
+    });
+
     await context.test('remains idempotent on a second execution', async () => {
       await resetTestSchema(connection);
       const firstRun = await runMigrationProcess();
@@ -356,9 +453,11 @@ test(
       assert.deepEqual(await readAppliedMigrationIds(connection), [
         '001_create_core_tables',
         '002_create_admin_sessions',
+        '003_enforce_unique_category_names',
       ]);
       await validateCoreSchema(connection, testDatabaseName, false);
       await validateAdminSessionsSchema(connection, testDatabaseName, false);
+      await validateCategoryManagementSchema(connection, testDatabaseName, false);
     });
 
     await context.test('serializes two concurrent migration runners', async () => {
@@ -372,8 +471,11 @@ test(
       assert.deepEqual(await readAppliedMigrationIds(connection), [
         '001_create_core_tables',
         '002_create_admin_sessions',
+        '003_enforce_unique_category_names',
       ]);
+      await validateCoreSchema(connection, testDatabaseName, false);
       await validateAdminSessionsSchema(connection, testDatabaseName, false);
+      await validateCategoryManagementSchema(connection, testDatabaseName, false);
     });
     } catch (error) {
       primaryError = error;

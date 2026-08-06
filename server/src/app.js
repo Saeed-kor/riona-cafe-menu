@@ -8,11 +8,13 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { createAdminCategoriesRouter } from './routes/adminCategories.routes.js';
 import { createAdminAuthRouter } from './routes/adminAuth.routes.js';
+import { createAdminProductsRouter } from './routes/adminProducts.routes.js';
 import healthRouter from './routes/health.routes.js';
 
 export function createApp({
   adminAuthService,
   adminCategoriesService,
+  adminProductsService,
   loginLimiter,
   trustProxy = env.TRUST_PROXY,
 } = {}) {
@@ -46,6 +48,13 @@ export function createApp({
     createAdminCategoriesRouter({
       authService: adminAuthService,
       categoriesService: adminCategoriesService,
+    }),
+  );
+  app.use(
+    '/api/admin/products',
+    createAdminProductsRouter({
+      authService: adminAuthService,
+      productsService: adminProductsService,
     }),
   );
   app.use('/api/health', healthRouter);

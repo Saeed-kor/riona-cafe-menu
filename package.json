@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test test/adminAuthClient.test.js test/adminAuthState.test.js test/adminApp.integration.test.js",
+    "test": "node --test test/adminAuthClient.test.js test/adminAuthState.test.js test/adminCategoriesClient.test.js test/adminApp.integration.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -63,6 +63,17 @@ function jsonResponse(payload, status = 200) {
   })
 }
 
+function createControlledResponse() {
+  let resolveResponse
+  let rejectResponse
+  const response = new Promise((resolvePromise, rejectPromise) => {
+    resolveResponse = resolvePromise
+    rejectResponse = rejectPromise
+  })
+
+  return { response, resolveResponse, rejectResponse }
+}
+
 async function settle() {
   for (let cycle = 0; cycle < 4; cycle += 1) {
     await act(() => new Promise((resolveCycle) => setTimeout(resolveCycle, 0)))
@@ -152,12 +163,16 @@ test('bootstraps /me and redirects an anonymous admin visitor to login', async (
 })
 
 test('redirects a bootstrapped administrator away from login', async () => {
-  const container = await mountApp('/admin/login', async () =>
-    jsonResponse({ success: true, admin: { id: '1', username: 'admin' } }),
-  )
+  const container = await mountApp('/admin/login', async (path) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    return jsonResponse({ success: true, categories: [] })
+  })
 
   assert.equal(dom.window.location.pathname, '/admin')
-  assert.match(container.textContent, /Signed in as admin/)
+  assert.match(container.textContent, /مدیر: admin/)
 })
 
 test('submits username login and logs the administrator out', async () => {
@@ -175,6 +190,10 @@ test('submits username login and logs the administrator out', async () => {
 
     if (path === '/api/admin/auth/logout') {
       return jsonResponse({ success: true, message: 'Logged out' })
+    }
+
+    if (path === '/api/admin/categories') {
+      return jsonResponse({ success: true, categories: [] })
     }
 
     throw new Error(`Unexpected request in App integration test: ${path}`)
@@ -197,10 +216,10 @@ test('submits username login and logs the administrator out', async () => {
     password: 'valid-password',
   })
   assert.equal(dom.window.location.pathname, '/admin')
-  assert.match(container.textContent, /Signed in as admin/)
+  assert.match(container.textContent, /مدیر: admin/)
 
   const logoutButton = [...container.querySelectorAll('button')].find(
-    (button) => button.textContent === 'Logout',
+    (button) => button.textContent === 'خروج',
   )
   await act(() =>
     logoutButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
@@ -242,5 +261,475 @@ test('shows bootstrap and login failures without granting admin access', async (
 
     assert.equal(dom.window.location.pathname, '/admin/login')
     assert.match(container.textContent, /Invalid username or password/)
+  })
+})
+
+test('renders the Persian RTL admin shell with category loading and empty states', async () => {
+  let resolveCategories
+  const pendingCategories = new Promise((resolveResponse) => {
+    resolveCategories = resolveResponse
+  })
+  const container = await mountApp('/admin', async (path) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    return pendingCategories
+  })
+
+  assert.equal(container.querySelector('.admin-panel').getAttribute('dir'), 'rtl')
+  assert.match(container.textContent, /پنل مدیریت/)
+  assert.match(container.textContent, /در حال دریافت دسته‌بندی‌ها/)
+  assert.equal(container.querySelector('#create-category-name').disabled, true)
+
+  resolveCategories(jsonResponse({ success: true, categories: [] }))
+  await settle()
+
+  assert.match(container.textContent, /هنوز دسته‌بندی‌ای ایجاد نشده است/)
+  assert.equal(container.querySelector('#create-category-name').disabled, false)
+})
+
+test('redirects to login when the category API reports an expired session', async () => {
+  const container = await mountApp('/admin/categories', async (path) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    return jsonResponse({ success: false, message: 'Authentication required' }, 401)
+  })
+
+  assert.equal(dom.window.location.pathname, '/admin/login')
+  assert.match(container.textContent, /Admin login/)
+})
+
+test('manages category create, edit, visibility, order, and confirmed deletion through the UI', async () => {
+  const requests = []
+  const fixedDate = '2026-08-04T12:00:00.000Z'
+  const categories = new Map([
+    ['2', { id: '2', name: 'دسر', sortOrder: 2, isVisible: true, createdAt: fixedDate, updatedAt: fixedDate }],
+    ['1', { id: '1', name: 'قهوه', sortOrder: 0, isVisible: true, createdAt: fixedDate, updatedAt: fixedDate }],
+  ])
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    requests.push({ path, options })
+
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [...categories.values()] })
+    }
+
+    if (path === '/api/admin/categories' && options.method === 'POST') {
+      const body = JSON.parse(options.body)
+      const created = { id: '3', ...body, createdAt: fixedDate, updatedAt: fixedDate }
+      categories.set(created.id, created)
+      return jsonResponse({ success: true, category: created }, 201)
+    }
+
+    const categoryId = path.split('/').at(-1)
+
+    if (options.method === 'PATCH') {
+      const updated = { ...categories.get(categoryId), ...JSON.parse(options.body), updatedAt: fixedDate }
+      categories.set(categoryId, updated)
+      return jsonResponse({ success: true, category: updated })
+    }
+
+    if (options.method === 'DELETE') {
+      categories.delete(categoryId)
+      return jsonResponse({ success: true, message: 'Category deleted' })
+    }
+
+    throw new Error(`Unexpected request in category UI test: ${path}`)
+  })
+
+  assert.deepEqual(
+    [...container.querySelectorAll('.category-item h3')].map((heading) => heading.textContent),
+    ['قهوه', 'دسر'],
+  )
+
+  await setInputValue(container.querySelector('#create-category-name'), ' نوشیدنی سرد ')
+  await setInputValue(container.querySelector('#create-category-order'), '1')
+  await act(() =>
+    container
+      .querySelector('#create-category-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  const createRequest = requests.find(
+    (request) => request.path === '/api/admin/categories' && request.options.method === 'POST',
+  )
+  assert.deepEqual(JSON.parse(createRequest.options.body), {
+    name: 'نوشیدنی سرد',
+    sortOrder: 1,
+    isVisible: true,
+  })
+  assert.deepEqual(
+    [...container.querySelectorAll('.category-item h3')].map((heading) => heading.textContent),
+    ['قهوه', 'نوشیدنی سرد', 'دسر'],
+  )
+
+  const createdItem = container.querySelector('[data-category-id="3"]')
+  const editButton = [...createdItem.querySelectorAll('button')].find(
+    (button) => button.textContent === 'ویرایش',
+  )
+  await act(() => editButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+  await setInputValue(container.querySelector('#edit-category-3-name'), 'نوشیدنی خنک')
+  await setInputValue(container.querySelector('#edit-category-3-order'), '4')
+  await act(() =>
+    container
+      .querySelector('#edit-category-3-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.match(container.querySelector('[data-category-id="3"]').textContent, /نوشیدنی خنک/)
+  assert.match(container.querySelector('[data-category-id="3"]').textContent, /ترتیب نمایش: 4/)
+
+  const visibilityButton = [...container.querySelector('[data-category-id="3"]').querySelectorAll('button')].find(
+    (button) => button.textContent === 'غیرفعال‌کردن',
+  )
+  await act(() =>
+    visibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+  assert.match(container.querySelector('[data-category-id="3"]').textContent, /غیرفعال/)
+
+  const originalConfirm = dom.window.confirm
+  let confirmationMessage = ''
+  dom.window.confirm = (message) => {
+    confirmationMessage = message
+    return true
+  }
+
+  try {
+    const deleteButton = [...container.querySelector('[data-category-id="3"]').querySelectorAll('button')].find(
+      (button) => button.textContent === 'حذف',
+    )
+    await act(() =>
+      deleteButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+    )
+    await settle()
+  } finally {
+    dom.window.confirm = originalConfirm
+  }
+
+  assert.match(confirmationMessage, /نوشیدنی خنک/)
+  assert.equal(container.querySelector('[data-category-id="3"]'), null)
+  assert.equal(requests.some((request) => request.options.method === 'DELETE'), true)
+})
+
+test('shows category validation and safe API errors without duplicate submission', async () => {
+  let createCalls = 0
+  let resolveCreate
+  const createResponse = new Promise((resolveResponse) => {
+    resolveCreate = resolveResponse
+  })
+  const container = await mountApp('/admin', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [] })
+    }
+
+    createCalls += 1
+    return createResponse
+  })
+  const createForm = container.querySelector('#create-category-name').closest('form')
+
+  await setInputValue(container.querySelector('#create-category-name'), '   ')
+  await act(() =>
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  assert.match(container.textContent, /نام دسته‌بندی را وارد کنید/)
+  assert.equal(createCalls, 0)
+
+  await setInputValue(container.querySelector('#create-category-name'), 'چای')
+  await act(() => {
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+  await settle()
+  assert.equal(createCalls, 1)
+  assert.equal(createForm.querySelector('button[type="submit"]').disabled, true)
+
+  resolveCreate(
+    jsonResponse({ success: false, message: 'A category with this name already exists' }, 409),
+  )
+  await settle()
+  assert.match(container.textContent, /دسته‌بندی دیگری با این نام وجود دارد/)
+})
+
+test('coalesces rapid visibility actions and releases the lock after success', async () => {
+  const firstUpdate = createControlledResponse()
+  const mutationRequests = []
+  const category = {
+    id: '1',
+    name: 'قهوه',
+    sortOrder: 0,
+    isVisible: true,
+    createdAt: '2026-08-04T12:00:00.000Z',
+    updatedAt: '2026-08-04T12:00:00.000Z',
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [category] })
+    }
+
+    mutationRequests.push({ path, method: options.method, body: JSON.parse(options.body) })
+
+    if (mutationRequests.length === 1) {
+      return firstUpdate.response
+    }
+
+    return jsonResponse({
+      success: true,
+      category: { ...category, isVisible: true },
+    })
+  })
+  const visibilityButton = [...container.querySelectorAll('[data-category-id="1"] button')].find(
+    (button) => button.textContent === 'غیرفعال‌کردن',
+  )
+
+  await act(() => {
+    visibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    visibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  })
+
+  assert.deepEqual(mutationRequests, [
+    { path: '/api/admin/categories/1', method: 'PATCH', body: { isVisible: false } },
+  ])
+
+  firstUpdate.resolveResponse(
+    jsonResponse({ success: true, category: { ...category, isVisible: false } }),
+  )
+  await settle()
+
+  const nextVisibilityButton = [
+    ...container.querySelectorAll('[data-category-id="1"] button'),
+  ].find((button) => button.textContent === 'فعال‌کردن')
+  await act(() =>
+    nextVisibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+
+  assert.deepEqual(mutationRequests[1], {
+    path: '/api/admin/categories/1',
+    method: 'PATCH',
+    body: { isVisible: true },
+  })
+})
+
+test('coalesces rapid confirmed deletes and releases the lock after an API rejection', async () => {
+  const firstDelete = createControlledResponse()
+  const deleteRequests = []
+  const category = {
+    id: '1',
+    name: 'قهوه',
+    sortOrder: 0,
+    isVisible: true,
+    createdAt: '2026-08-04T12:00:00.000Z',
+    updatedAt: '2026-08-04T12:00:00.000Z',
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [category] })
+    }
+
+    deleteRequests.push({ path, method: options.method })
+
+    if (deleteRequests.length === 1) {
+      return firstDelete.response
+    }
+
+    return jsonResponse({ success: true, message: 'Category deleted' })
+  })
+  const originalConfirm = dom.window.confirm
+  let confirmationCount = 0
+  dom.window.confirm = () => {
+    confirmationCount += 1
+    return true
+  }
+
+  try {
+    const deleteButton = [...container.querySelectorAll('[data-category-id="1"] button')].find(
+      (button) => button.textContent === 'حذف',
+    )
+    await act(() => {
+      deleteButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      deleteButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+
+    assert.deepEqual(deleteRequests, [
+      { path: '/api/admin/categories/1', method: 'DELETE' },
+    ])
+    assert.equal(confirmationCount, 1)
+
+    firstDelete.resolveResponse(
+      jsonResponse(
+        { success: false, message: 'A category with menu items cannot be deleted' },
+        409,
+      ),
+    )
+    await settle()
+    assert.notEqual(container.querySelector('[data-category-id="1"]'), null)
+
+    const retryDeleteButton = [
+      ...container.querySelectorAll('[data-category-id="1"] button'),
+    ].find((button) => button.textContent === 'حذف')
+    await act(() =>
+      retryDeleteButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+    )
+    await settle()
+
+    assert.equal(deleteRequests.length, 2)
+    assert.equal(confirmationCount, 2)
+    assert.equal(container.querySelector('[data-category-id="1"]'), null)
+  } finally {
+    dom.window.confirm = originalConfirm
+  }
+})
+
+test('blocks row actions while a create submission is pending', async () => {
+  const pendingCreate = createControlledResponse()
+  const mutationRequests = []
+  const category = {
+    id: '1',
+    name: 'قهوه',
+    sortOrder: 0,
+    isVisible: true,
+    createdAt: '2026-08-04T12:00:00.000Z',
+    updatedAt: '2026-08-04T12:00:00.000Z',
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [category] })
+    }
+
+    mutationRequests.push({ path, method: options.method })
+
+    if (options.method === 'POST') {
+      return pendingCreate.response
+    }
+
+    return jsonResponse({
+      success: true,
+      category: { ...category, isVisible: false },
+    })
+  })
+  await setInputValue(container.querySelector('#create-category-name'), 'چای')
+  const createForm = container.querySelector('#create-category-name').closest('form')
+  const visibilityButton = [...container.querySelectorAll('[data-category-id="1"] button')].find(
+    (button) => button.textContent === 'غیرفعال‌کردن',
+  )
+
+  await act(() => {
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    visibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  })
+
+  assert.deepEqual(mutationRequests, [{ path: '/api/admin/categories', method: 'POST' }])
+
+  pendingCreate.resolveResponse(
+    jsonResponse(
+      {
+        success: true,
+        category: { ...category, id: '2', name: 'چای' },
+      },
+      201,
+    ),
+  )
+  await settle()
+
+  const unlockedVisibilityButton = [
+    ...container.querySelectorAll('[data-category-id="1"] button'),
+  ].find((button) => button.textContent === 'غیرفعال‌کردن')
+  await act(() =>
+    unlockedVisibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+
+  assert.deepEqual(mutationRequests[1], {
+    path: '/api/admin/categories/1',
+    method: 'PATCH',
+  })
+})
+
+test('blocks form submission while a row action is pending and unlocks after failure', async () => {
+  const pendingUpdate = createControlledResponse()
+  const mutationRequests = []
+  const category = {
+    id: '1',
+    name: 'قهوه',
+    sortOrder: 0,
+    isVisible: true,
+    createdAt: '2026-08-04T12:00:00.000Z',
+    updatedAt: '2026-08-04T12:00:00.000Z',
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [category] })
+    }
+
+    mutationRequests.push({ path, method: options.method })
+
+    if (options.method === 'PATCH') {
+      return pendingUpdate.response
+    }
+
+    return jsonResponse({
+      success: true,
+      category: { ...category, id: '2', name: 'چای' },
+    }, 201)
+  })
+  await setInputValue(container.querySelector('#create-category-name'), 'چای')
+  const createForm = container.querySelector('#create-category-name').closest('form')
+  const visibilityButton = [...container.querySelectorAll('[data-category-id="1"] button')].find(
+    (button) => button.textContent === 'غیرفعال‌کردن',
+  )
+
+  await act(() => {
+    visibilityButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+
+  assert.deepEqual(mutationRequests, [
+    { path: '/api/admin/categories/1', method: 'PATCH' },
+  ])
+
+  pendingUpdate.resolveResponse(
+    jsonResponse({ success: false, message: 'The category request could not be completed.' }, 500),
+  )
+  await settle()
+
+  await act(() =>
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.deepEqual(mutationRequests[1], {
+    path: '/api/admin/categories',
+    method: 'POST',
   })
 })

@@ -6,11 +6,13 @@ import helmet from 'helmet';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
+import { createAdminCategoriesRouter } from './routes/adminCategories.routes.js';
 import { createAdminAuthRouter } from './routes/adminAuth.routes.js';
 import healthRouter from './routes/health.routes.js';
 
 export function createApp({
   adminAuthService,
+  adminCategoriesService,
   loginLimiter,
   trustProxy = env.TRUST_PROXY,
 } = {}) {
@@ -37,6 +39,13 @@ export function createApp({
       authService: adminAuthService,
       isProduction: env.NODE_ENV === 'production',
       loginLimiter,
+    }),
+  );
+  app.use(
+    '/api/admin/categories',
+    createAdminCategoriesRouter({
+      authService: adminAuthService,
+      categoriesService: adminCategoriesService,
     }),
   );
   app.use('/api/health', healthRouter);

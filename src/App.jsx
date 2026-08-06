@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import reactLogo from './assets/react.svg'
 import viteLogo from './assets/vite.svg'
 import heroImg from './assets/hero.png'
+import { AdminPanel } from './admin/AdminPanel.jsx'
 import { adminAuthApi } from './api/adminAuth.js'
 import {
   adminAuthStatus,
@@ -198,51 +199,6 @@ function AdminLogin({ onLogin }) {
   )
 }
 
-function AdminShell({ admin, onLogout }) {
-  const [isLoggingOut, setIsLoggingOut] = useState(false)
-  const [errorMessage, setErrorMessage] = useState('')
-
-  async function handleLogout() {
-    setIsLoggingOut(true)
-    setErrorMessage('')
-
-    try {
-      await onLogout()
-    } catch {
-      setErrorMessage('Logout could not be completed. Please try again.')
-      setIsLoggingOut(false)
-    }
-  }
-
-  return (
-    <main className="admin-page">
-      <section className="admin-card" aria-labelledby="admin-shell-title">
-        <p className="admin-eyebrow">Riona Cafe</p>
-        <h1 id="admin-shell-title">Admin</h1>
-        <p className="admin-welcome">
-          Signed in as <strong>{admin.username}</strong>
-        </p>
-        <p className="admin-muted">The administration workspace will be added in later slices.</p>
-
-        {errorMessage ? (
-          <p className="admin-error" role="alert">
-            {errorMessage}
-          </p>
-        ) : null}
-
-        <button
-          className="admin-secondary-button"
-          type="button"
-          onClick={handleLogout}
-          disabled={isLoggingOut}
-        >
-          {isLoggingOut ? 'Signing out…' : 'Logout'}
-        </button>
-      </section>
-    </main>
-  )
-}
-
 function AdminBootstrapError({ onRetry }) {
   return (
     <main className="admin-page">
@@ -312,6 +268,10 @@ function App() {
     setAuth({ status: adminAuthStatus.anonymous, admin: null, error: null })
   }
 
+  const handleAuthenticationRequired = useCallback(() => {
+    setAuth({ status: adminAuthStatus.anonymous, admin: null, error: null })
+  }, [])
+
   const isAdminPath = pathname === '/admin' || pathname.startsWith('/admin/')
 
   if (!isAdminPath) {
@@ -330,8 +290,14 @@ function App() {
     return <AdminLogin onLogin={handleLogin} />
   }
 
-  if (pathname === '/admin' && auth.admin) {
-    return <AdminShell admin={auth.admin} onLogout={handleLogout} />
+  if ((pathname === '/admin' || pathname === '/admin/categories') && auth.admin) {
+    return (
+      <AdminPanel
+        admin={auth.admin}
+        onLogout={handleLogout}
+        onAuthenticationRequired={handleAuthenticationRequired}
+      />
+    )
   }
 
   return <AdminLoading message="Admin page not found." />

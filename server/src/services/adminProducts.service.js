@@ -1,3 +1,9 @@
+import { productImageStorage as defaultProductImageStorage } from '../storage/productImages.storage.js';
+import {
+  logProductImageCleanupFailure,
+  removeProductImageAfterCommit,
+} from './productImageCleanup.js';
+
 export const maximumProductNameCharacters = 150;
 export const maximumProductDescriptionBytes = 65_535;
 
@@ -204,7 +210,7 @@ export function validateProductChanges(body) {
   };
 }
 
-function toProduct(row) {
+export function toProduct(row) {
   return {
     id: String(row.id),
     categoryId: String(row.categoryId),
@@ -212,6 +218,9 @@ function toProduct(row) {
     name: row.name,
     description: row.description,
     price: String(row.price),
+    imagePath: row.imagePath === null || row.imagePath === undefined
+      ? null
+      : String(row.imagePath),
     sortOrder: Number(row.sortOrder),
     isAvailable: Number(row.isAvailable) === 1,
     isVisible: Number(row.isVisible) === 1,
@@ -252,19 +261,20 @@ async function assertCategoryExists(executor, categoryId) {
   }
 }
 
-async function selectProductById(executor, productId) {
+export async function selectProductById(executor, productId, { forUpdate = false } = {}) {
   const [rows] = await executor.execute(
     `SELECT CAST(menuItems.id AS CHAR) AS id,
             CAST(menuItems.category_id AS CHAR) AS categoryId,
             categories.name AS categoryName, menuItems.name,
             menuItems.description, CAST(menuItems.price AS CHAR) AS price,
+            menuItems.image_path AS imagePath,
             menuItems.display_order AS sortOrder,
             menuItems.is_available AS isAvailable,
             menuItems.is_visible AS isVisible
        FROM menu_items AS menuItems
        JOIN categories ON categories.id = menuItems.category_id
       WHERE menuItems.id = ?
-      LIMIT 1`,
+      LIMIT 1${forUpdate ? ' FOR UPDATE' : ''}`,
     [productId],
   );
 
@@ -300,7 +310,56 @@ function combineCreateErrors(primaryError, cleanupErrors) {
   );
 }
 
-export function createAdminProductsService({ executor } = {}) {
+function combineDeleteErrors(primaryError, cleanupErrors) {
+  if (cleanupErrors.length === 0) {
+    return primaryError;
+  }
+
+  const combinedError = new AggregateError(
+    [primaryError, ...cleanupErrors],
+    'Product deletion failed and cleanup was incomplete.',
+    { cause: primaryError },
+  );
+
+  combinedError.code = cleanupErrors.some(
+    (error) => error?.code === 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN',
+  )
+    ? 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN'
+    : (primaryError?.code ?? 'PRODUCT_DELETE_FAILED');
+  return combinedError;
+}
+
+function ambiguousDeleteCommitOutcomeError() {
+  const error = new Error('Product deletion commit outcome could not be determined.');
+  error.code = 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN';
+  return error;
+}
+
+async function closeDeleteConnection(
+  connection,
+  cleanupErrors,
+  { discard = false } = {},
+) {
+  if (!connection) {
+    return;
+  }
+
+  try {
+    if (discard && typeof connection.destroy === 'function') {
+      await connection.destroy();
+    } else {
+      await connection.release();
+    }
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+}
+
+export function createAdminProductsService({
+  executor,
+  productImageStorage = defaultProductImageStorage,
+  logger = console,
+} = {}) {
   return Object.freeze({
     async list() {
       const databaseExecutor = executor ?? (await getDefaultExecutor());
@@ -309,6 +368,7 @@ export function createAdminProductsService({ executor } = {}) {
                 CAST(menuItems.category_id AS CHAR) AS categoryId,
                 categories.name AS categoryName, menuItems.name,
                 menuItems.description, CAST(menuItems.price AS CHAR) AS price,
+                menuItems.image_path AS imagePath,
                 menuItems.display_order AS sortOrder,
                 menuItems.is_available AS isAvailable,
                 menuItems.is_visible AS isVisible
@@ -468,14 +528,85 @@ export function createAdminProductsService({ executor } = {}) {
     async remove(productIdValue) {
       const productId = parseProductId(productIdValue);
       const databaseExecutor = executor ?? (await getDefaultExecutor());
-      const [result] = await databaseExecutor.execute(
-        'DELETE FROM menu_items WHERE id = ?',
-        [productId],
-      );
+      let connection = null;
+      let previousImagePath = null;
+      let primaryError = null;
+      let transactionStarted = false;
+      let commitAttempted = false;
+      let commitSucceeded = false;
+      const cleanupErrors = [];
 
-      if (Number(result.affectedRows) === 0) {
-        throw productNotFoundError();
+      try {
+        connection = await databaseExecutor.getConnection();
+        await connection.beginTransaction();
+        transactionStarted = true;
+        const product = await selectProductById(connection, productId, {
+          forUpdate: true,
+        });
+
+        if (!product) {
+          throw productNotFoundError();
+        }
+
+        previousImagePath = product.imagePath;
+        const [result] = await connection.execute(
+          'DELETE FROM menu_items WHERE id = ?',
+          [productId],
+        );
+
+        if (Number(result.affectedRows) === 0) {
+          throw productNotFoundError();
+        }
+
+        commitAttempted = true;
+        await connection.commit();
+        commitSucceeded = true;
+        transactionStarted = false;
+      } catch (error) {
+        primaryError = error;
+
+        if (transactionStarted && !commitAttempted) {
+          try {
+            await connection.rollback();
+            transactionStarted = false;
+          } catch (rollbackError) {
+            cleanupErrors.push(rollbackError);
+          }
+        }
+      } finally {
+        if (connection) {
+          if (commitSucceeded) {
+            const releaseErrors = [];
+            await closeDeleteConnection(connection, releaseErrors);
+
+            for (const releaseError of releaseErrors) {
+              logProductImageCleanupFailure(
+                logger,
+                'release-connection',
+                releaseError,
+              );
+            }
+          } else {
+            await closeDeleteConnection(connection, cleanupErrors, {
+              discard: commitAttempted,
+            });
+          }
+        }
       }
+
+      if (primaryError) {
+        if (commitAttempted) {
+          cleanupErrors.push(ambiguousDeleteCommitOutcomeError());
+        }
+
+        throw combineDeleteErrors(primaryError, cleanupErrors);
+      }
+
+      await removeProductImageAfterCommit(
+        productImageStorage,
+        previousImagePath,
+        logger,
+      );
     },
   });
 }

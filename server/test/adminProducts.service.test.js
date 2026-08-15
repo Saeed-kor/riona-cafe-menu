@@ -17,6 +17,7 @@ function productRow(overrides = {}) {
     name: 'قهوه',
     description: 'قهوه تازه‌دم',
     price: '125000',
+    imagePath: null,
     sortOrder: 3,
     isAvailable: 1,
     isVisible: 1,
@@ -138,11 +139,12 @@ function createTransactionHarness({
 
 test('lists products deterministically and maps only the camelCase API contract', async () => {
   const calls = [];
+  const imagePath = `/uploads/products/${'ab'.repeat(16)}.png`;
   const service = createAdminProductsService({
     executor: {
       async execute(sql, parameters) {
         calls.push({ sql, parameters });
-        return [[productRow({ isAvailable: 0 })], []];
+        return [[productRow({ imagePath, isAvailable: 0 })], []];
       },
     },
   });
@@ -152,6 +154,7 @@ test('lists products deterministically and maps only the camelCase API contract'
   assert.match(calls[0].sql, /JOIN categories ON categories\.id = menuItems\.category_id/);
   assert.match(calls[0].sql, /ORDER BY menuItems\.display_order ASC, menuItems\.id ASC/);
   assert.match(calls[0].sql, /CAST\(menuItems\.price AS CHAR\) AS price/);
+  assert.match(calls[0].sql, /menuItems\.image_path AS imagePath/);
   assert.equal(calls[0].parameters, undefined);
   assert.deepEqual(products, [
     {
@@ -161,6 +164,7 @@ test('lists products deterministically and maps only the camelCase API contract'
       name: 'قهوه',
       description: 'قهوه تازه‌دم',
       price: '125000',
+      imagePath,
       sortOrder: 3,
       isAvailable: false,
       isVisible: true,
@@ -773,27 +777,53 @@ test('returns safe errors for missing products and missing categories', async (c
 });
 
 test('deletes products using the driver result header and preserves unknown errors', async (context) => {
-  await context.test('successful parameterized delete', async () => {
+  function createDeleteExecutor({
+    lockedRows = [productRow({ id: '7' })],
+    affectedRows = 1,
+    deleteError,
+  } = {}) {
     const calls = [];
-    const service = createAdminProductsService({
-      executor: {
-        async execute(sql, parameters) {
-          calls.push({ sql, parameters });
-          return [{ affectedRows: 1 }, []];
-        },
+    const connection = {
+      async beginTransaction() { calls.push({ operation: 'begin' }); },
+      async execute(sql, parameters) {
+        calls.push({ sql, parameters });
+
+        if (sql.includes('FROM menu_items AS menuItems')) {
+          return [lockedRows, []];
+        }
+
+        if (deleteError) throw deleteError;
+        return [{ affectedRows }, []];
       },
-    });
+      async commit() { calls.push({ operation: 'commit' }); },
+      async rollback() { calls.push({ operation: 'rollback' }); },
+      release() { calls.push({ operation: 'release' }); },
+    };
+
+    return {
+      calls,
+      executor: { async getConnection() { return connection; } },
+    };
+  }
+
+  await context.test('successful parameterized delete', async () => {
+    const harness = createDeleteExecutor();
+    const service = createAdminProductsService({ executor: harness.executor });
 
     await service.remove('7');
-    assert.deepEqual(calls, [
-      { sql: 'DELETE FROM menu_items WHERE id = ?', parameters: ['7'] },
-    ]);
+    const deleteQuery = harness.calls.find(
+      (call) => call.sql === 'DELETE FROM menu_items WHERE id = ?',
+    );
+    assert.deepEqual(deleteQuery.parameters, ['7']);
+    assert.equal(
+      harness.calls.some((call) => call.operation === 'commit'),
+      true,
+    );
   });
 
   await context.test('not found delete', async () => {
-    const service = createAdminProductsService({
-      executor: { async execute() { return [{ affectedRows: 0 }, []]; } },
-    });
+    const harness = createDeleteExecutor({ lockedRows: [] });
+    const service = createAdminProductsService({ executor: harness.executor });
 
     await assert.rejects(
       service.remove('7'),
@@ -805,9 +835,8 @@ test('deletes products using the driver result header and preserves unknown erro
     const databaseError = Object.assign(new Error('internal SQL detail'), {
       code: 'ER_LOCK_DEADLOCK',
     });
-    const service = createAdminProductsService({
-      executor: { async execute() { throw databaseError; } },
-    });
+    const harness = createDeleteExecutor({ deleteError: databaseError });
+    const service = createAdminProductsService({ executor: harness.executor });
 
     await assert.rejects(service.remove('7'), (error) => error === databaseError);
   });
@@ -817,9 +846,8 @@ test('deletes products using the driver result header and preserves unknown erro
       code: 'ER_ROW_IS_REFERENCED_2',
       errno: 1451,
     });
-    const service = createAdminProductsService({
-      executor: { async execute() { throw databaseError; } },
-    });
+    const harness = createDeleteExecutor({ deleteError: databaseError });
+    const service = createAdminProductsService({ executor: harness.executor });
 
     await assert.rejects(service.remove('7'), (error) => error === databaseError);
   });

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 
+import { configureTestEnvironment } from '../test-support/testEnvironment.js';
+
+configureTestEnvironment();
 Object.assign(process.env, {
   PORT: '3000',
   CLIENT_URL: 'http://localhost:5173',

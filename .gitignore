@@ -25,3 +25,6 @@ dist-ssr
 
 # Backend environment secrets
 /server/.env
+
+# Runtime uploads
+/server/uploads/products/

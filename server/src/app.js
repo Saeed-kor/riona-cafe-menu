@@ -4,18 +4,25 @@ import express from 'express';
 import helmet from 'helmet';
 
 import { env } from './config/env.js';
+import {
+  productImagesDirectory as defaultProductImagesDirectory,
+  productImagesPublicPath,
+} from './config/productImages.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { createAdminCategoriesRouter } from './routes/adminCategories.routes.js';
 import { createAdminAuthRouter } from './routes/adminAuth.routes.js';
+import { createAdminProductImagesRouter } from './routes/adminProductImages.routes.js';
 import { createAdminProductsRouter } from './routes/adminProducts.routes.js';
 import healthRouter from './routes/health.routes.js';
 
 export function createApp({
   adminAuthService,
   adminCategoriesService,
+  adminProductImagesService,
   adminProductsService,
   loginLimiter,
+  productImagesDirectory = defaultProductImagesDirectory,
   trustProxy = env.TRUST_PROXY,
 } = {}) {
   const app = express();
@@ -23,6 +30,10 @@ export function createApp({
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
   app.use(helmet());
+  app.options('/api/admin/products/:productId/image', (_request, response, next) => {
+    response.set('Cache-Control', 'no-store');
+    next();
+  });
   app.use(
     cors({
       origin(requestOrigin, callback) {
@@ -30,6 +41,14 @@ export function createApp({
         callback(null, isAllowed);
       },
       credentials: true,
+    }),
+  );
+  app.use(
+    productImagesPublicPath,
+    express.static(productImagesDirectory, {
+      dotfiles: 'deny',
+      fallthrough: true,
+      index: false,
     }),
   );
   app.use(express.json({ limit: '100kb' }));
@@ -48,6 +67,13 @@ export function createApp({
     createAdminCategoriesRouter({
       authService: adminAuthService,
       categoriesService: adminCategoriesService,
+    }),
+  );
+  app.use(
+    '/api/admin/products',
+    createAdminProductImagesRouter({
+      authService: adminAuthService,
+      productImagesService: adminProductImagesService,
     }),
   );
   app.use(

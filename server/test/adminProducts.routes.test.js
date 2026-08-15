@@ -2,15 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-process.env.NODE_ENV ??= 'test';
-process.env.TRUST_PROXY ??= 'false';
-process.env.PORT ??= '3000';
-process.env.CLIENT_URL ??= 'http://localhost:5173';
-process.env.DB_HOST ??= 'localhost';
-process.env.DB_PORT ??= '3306';
-process.env.DB_USER ??= 'root';
-process.env.DB_PASSWORD ??= '';
-process.env.DB_NAME ??= 'riona_cafe_menu';
+import { configureTestEnvironment } from '../test-support/testEnvironment.js';
+
+configureTestEnvironment();
 
 const { createApp } = await import('../src/app.js');
 const { adminSessionCookieName } = await import('../src/routes/adminAuth.routes.js');
@@ -21,9 +15,10 @@ const { createAdminProductsService } = await import(
 const validToken = 'a'.repeat(64);
 const validCookie = `${adminSessionCookieName}=${validToken}`;
 
-function createAuthService() {
+function createAuthService(onCurrentAdmin = () => {}) {
   return {
     async getCurrentAdmin(token) {
+      onCurrentAdmin();
       return token === validToken ? { id: '1', username: 'admin' } : null;
     },
     async login() {
@@ -58,6 +53,7 @@ function product(overrides = {}) {
     name: 'قهوه',
     description: 'قهوه تازه‌دم',
     price: '125000',
+    imagePath: null,
     sortOrder: 0,
     isAvailable: true,
     isVisible: true,
@@ -111,6 +107,7 @@ test('every product operation requires a valid admin session', async (context) =
 
 test('product routes expose the CRUD response contract through real middleware', async (context) => {
   const products = [product()];
+  let authCalls = 0;
   const productsService = {
     async list() { return products; },
     async create(body) { return product({ id: '2', ...body, categoryId: String(body.categoryId) }); },
@@ -118,7 +115,7 @@ test('product routes expose the CRUD response contract through real middleware',
     async remove() {},
   };
   const app = createApp({
-    adminAuthService: createAuthService(),
+    adminAuthService: createAuthService(() => { authCalls += 1; }),
     adminProductsService: productsService,
   });
   const server = await startTestServer(app);
@@ -130,6 +127,7 @@ test('product routes expose the CRUD response contract through real middleware',
   assert.equal(listResponse.status, 200);
   assert.equal(listResponse.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await listResponse.json(), { success: true, products });
+  assert.equal(authCalls, 1);
 
   const createResponse = await fetch(
     `${server.baseUrl}/api/admin/products`,
@@ -144,6 +142,7 @@ test('product routes expose the CRUD response contract through real middleware',
     }),
   );
   assert.equal(createResponse.status, 201);
+  assert.equal(authCalls, 2);
   assert.equal((await createResponse.json()).product.name, 'چای');
 
   const updateResponse = await fetch(
@@ -151,6 +150,7 @@ test('product routes expose the CRUD response contract through real middleware',
     jsonRequest('PATCH', { isAvailable: false }),
   );
   assert.equal(updateResponse.status, 200);
+  assert.equal(authCalls, 3);
   assert.equal((await updateResponse.json()).product.isAvailable, false);
 
   const deleteResponse = await fetch(
@@ -162,6 +162,7 @@ test('product routes expose the CRUD response contract through real middleware',
     success: true,
     message: 'Product deleted',
   });
+  assert.equal(authCalls, 4);
 });
 
 test('product routes map validation and missing records to safe responses', async (context) => {

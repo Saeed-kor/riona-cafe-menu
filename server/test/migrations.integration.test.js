@@ -19,6 +19,7 @@ import {
   runFailSafeCleanup,
   validateIntegrationDatabaseConfiguration,
 } from '../test-support/integrationDatabase.js';
+import { configureTestEnvironment } from '../test-support/testEnvironment.js';
 
 const serverRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const envFilePath = fileURLToPath(new URL('../.env', import.meta.url));
@@ -166,8 +167,7 @@ test(
       await authorizeIntegrationDatabase(connection, integrationConfiguration);
       databaseOwnershipVerified = true;
 
-      process.env.PORT ??= '3000';
-      process.env.CLIENT_URL ??= 'http://localhost:5173';
+      configureTestEnvironment();
       process.env.DB_HOST = validatedIntegrationTarget.host;
       process.env.DB_PORT = String(validatedIntegrationTarget.port);
       process.env.DB_USER = validatedIntegrationTarget.user;

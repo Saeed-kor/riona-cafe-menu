@@ -2,15 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-process.env.NODE_ENV ??= 'test';
-process.env.TRUST_PROXY ??= 'false';
-process.env.PORT ??= '3000';
-process.env.CLIENT_URL ??= 'http://localhost:5173';
-process.env.DB_HOST ??= 'localhost';
-process.env.DB_PORT ??= '3306';
-process.env.DB_USER ??= 'root';
-process.env.DB_PASSWORD ??= '';
-process.env.DB_NAME ??= 'riona_cafe_menu';
+import { configureTestEnvironment } from '../test-support/testEnvironment.js';
+
+configureTestEnvironment();
 
 const { createApp } = await import('../src/app.js');
 const { adminSessionCookieName } = await import('../src/routes/adminAuth.routes.js');

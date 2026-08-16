@@ -48,6 +48,7 @@ function category(overrides = {}) {
   return {
     id: '1',
     name: 'نوشیدنی گرم',
+    imagePath: null,
     sortOrder: 0,
     isVisible: true,
     createdAt: '2026-08-04T12:00:00.000Z',
@@ -147,6 +148,20 @@ test('category routes expose the CRUD response contract through real middleware'
 });
 
 test('category routes map validation, missing records, and conflicts without SQL details', async (context) => {
+  const deleteConnection = {
+    async beginTransaction() {},
+    async execute(sql) {
+      if (sql.startsWith('SELECT') && sql.includes('FROM categories')) {
+        return [[category()], []];
+      }
+
+      throw Object.assign(new Error('sensitive foreign key SQL detail'), {
+        code: 'ER_ROW_IS_REFERENCED_2',
+      });
+    },
+    async rollback() {},
+    release() {},
+  };
   const executor = {
     async execute(sql) {
       if (sql.startsWith('DELETE')) {
@@ -156,6 +171,9 @@ test('category routes map validation, missing records, and conflicts without SQL
       }
 
       return [[], []];
+    },
+    async getConnection() {
+      return deleteConnection;
     },
   };
   const app = createApp({

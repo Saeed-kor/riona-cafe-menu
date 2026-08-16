@@ -33,12 +33,20 @@ const supportedFormats = Object.freeze({
   }),
 });
 
-export function createProductImageError(message, code, status = 400) {
+function createImageError(message, code, status = 400) {
   const error = new Error(message);
   error.code = code;
   error.status = status;
   error.isSafeToDisplay = true;
   return error;
+}
+
+export function createManagedImageError(message, code, status = 400) {
+  return createImageError(message, code, status);
+}
+
+export function createProductImageError(message, code, status = 400) {
+  return createImageError(message, code, status);
 }
 
 function hasSafeOriginalName(originalName) {
@@ -75,7 +83,7 @@ export async function detectProductImageFormat(buffer) {
   }
 }
 
-async function createCanonicalProductImage(buffer, format) {
+async function createCanonicalImage(buffer, format, subject, codePrefix) {
   const encoder = sharp(buffer, sharpInputOptions).rotate();
   let canonicalBuffer;
 
@@ -88,9 +96,9 @@ async function createCanonicalProductImage(buffer, format) {
   }
 
   if (canonicalBuffer.length > maximumProductImageBytes) {
-    throw createProductImageError(
-      'Product image exceeds the 5 MiB limit',
-      'PRODUCT_IMAGE_TOO_LARGE',
+    throw createImageError(
+      `${subject} exceeds the 5 MiB limit`,
+      `${codePrefix}_TOO_LARGE`,
       413,
     );
   }
@@ -98,30 +106,33 @@ async function createCanonicalProductImage(buffer, format) {
   return canonicalBuffer;
 }
 
-export async function validateProductImageFile(file) {
+export async function validateManagedImageFile(
+  file,
+  { subject = 'Image', codePrefix = 'IMAGE' } = {},
+) {
   if (!file || !Buffer.isBuffer(file.buffer)) {
-    throw createProductImageError(
-      'Exactly one product image is required',
-      'PRODUCT_IMAGE_REQUIRED',
+    throw createImageError(
+      `Exactly one ${subject.toLowerCase()} is required`,
+      `${codePrefix}_REQUIRED`,
     );
   }
 
   if (file.buffer.length === 0) {
-    throw createProductImageError('Product image is empty', 'EMPTY_PRODUCT_IMAGE');
+    throw createImageError(`${subject} is empty`, `EMPTY_${codePrefix}`);
   }
 
   if (file.buffer.length > maximumProductImageBytes) {
-    throw createProductImageError(
-      'Product image exceeds the 5 MiB limit',
-      'PRODUCT_IMAGE_TOO_LARGE',
+    throw createImageError(
+      `${subject} exceeds the 5 MiB limit`,
+      `${codePrefix}_TOO_LARGE`,
       413,
     );
   }
 
   if (!hasSafeOriginalName(file.originalname)) {
-    throw createProductImageError(
-      'Product image filename is invalid',
-      'INVALID_PRODUCT_IMAGE_NAME',
+    throw createImageError(
+      `${subject} filename is invalid`,
+      `INVALID_${codePrefix}_NAME`,
     );
   }
 
@@ -133,17 +144,36 @@ export async function validateProductImageFile(file) {
     file.mimetype !== format.mimeType ||
     !format.acceptedExtensions.has(extension)
   ) {
-    throw createProductImageError(
-      'Product image must be a valid JPEG, PNG, or WebP file',
-      'INVALID_PRODUCT_IMAGE_FORMAT',
+    throw createImageError(
+      `${subject} must be a valid JPEG, PNG, or WebP file`,
+      `INVALID_${codePrefix}_FORMAT`,
     );
   }
 
-  const canonicalBuffer = await createCanonicalProductImage(file.buffer, format);
+  const canonicalBuffer = await createCanonicalImage(
+    file.buffer,
+    format,
+    subject,
+    codePrefix,
+  );
 
   return Object.freeze({
     buffer: canonicalBuffer,
     extension: format.extension,
     mimeType: format.mimeType,
+  });
+}
+
+export function validateProductImageFile(file) {
+  return validateManagedImageFile(file, {
+    subject: 'Product image',
+    codePrefix: 'PRODUCT_IMAGE',
+  });
+}
+
+export function validateCategoryImageFile(file) {
+  return validateManagedImageFile(file, {
+    subject: 'Category image',
+    codePrefix: 'CATEGORY_IMAGE',
   });
 }

@@ -33,6 +33,7 @@ function createHarness({
   const events = [];
   const queries = [];
   const logs = [];
+  let destroyCount = 0;
   let releaseCount = 0;
   let useVerificationConnection = false;
   const connection = {
@@ -94,8 +95,13 @@ function createHarness({
       }
     },
     destroy() {
+      destroyCount += 1;
       events.push('destroy');
       useVerificationConnection = true;
+
+      if (failures.destroy) {
+        throw failures.destroy;
+      }
     },
     release() {
       releaseCount += 1;
@@ -180,6 +186,9 @@ function createHarness({
     logs,
     queries,
     storage,
+    get destroyCount() {
+      return destroyCount;
+    },
     get releaseCount() {
       return releaseCount;
     },
@@ -335,16 +344,14 @@ test('rolls back and removes the new image when the product is missing or reload
   });
 });
 
-test('retains the primary failure when rollback, release, and new-file cleanup all fail', async () => {
+test('destroys a rollback-failed replace connection without releasing it', async () => {
   const primaryError = new Error('update failed');
   const rollbackError = new Error('rollback failed');
-  const releaseError = new Error('release failed');
   const cleanupError = new Error('new image cleanup failed');
   const harness = createHarness({
     failures: {
       update: primaryError,
       rollback: rollbackError,
-      release: releaseError,
     },
     removeFailures: new Map([[newImagePath, cleanupError]]),
   });
@@ -359,10 +366,53 @@ test('retains the primary failure when rollback, release, and new-file cleanup a
       error.cause === primaryError &&
       error.errors[0] === primaryError &&
       error.errors[1] === rollbackError &&
-      error.errors[2] === releaseError &&
-      error.errors[3] === cleanupError,
+      error.errors[2] === cleanupError,
   );
-  assert.equal(harness.releaseCount, 1);
+  assert.deepEqual(
+    { destroy: harness.destroyCount, release: harness.releaseCount },
+    { destroy: 1, release: 0 },
+  );
+  assert.deepEqual(harness.events.slice(-3), [
+    'rollback',
+    'destroy',
+    `remove:${newImagePath}`,
+  ]);
+  assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
+});
+
+test('does not release a rollback-failed connection when destroy also fails', async () => {
+  const primaryError = new Error('update failed');
+  const rollbackError = new Error('rollback failed');
+  const destroyError = new Error('destroy failed');
+  const harness = createHarness({
+    failures: {
+      update: primaryError,
+      rollback: rollbackError,
+      destroy: destroyError,
+    },
+  });
+
+  await assert.rejects(
+    createService(harness).replace(maximumId, {
+      buffer: Buffer.from('image'),
+      extension: '.png',
+    }),
+    (error) =>
+      error instanceof AggregateError &&
+      error.cause === primaryError &&
+      error.errors[0] === primaryError &&
+      error.errors[1] === rollbackError &&
+      error.errors[2] === destroyError,
+  );
+  assert.deepEqual(
+    { destroy: harness.destroyCount, release: harness.releaseCount },
+    { destroy: 1, release: 0 },
+  );
+  assert.deepEqual(harness.events.slice(-3), [
+    'rollback',
+    'destroy',
+    `remove:${newImagePath}`,
+  ]);
 });
 
 test('retains the primary failure when each pre-commit cleanup step fails alone', async (context) => {
@@ -403,7 +453,12 @@ test('retains the primary failure when each pre-commit cleanup step fails alone'
             (failureOptions.failures?.[label] ??
               failureOptions.removeFailures?.get(newImagePath)),
       );
-      assert.equal(harness.releaseCount, 1);
+      assert.deepEqual(
+        { destroy: harness.destroyCount, release: harness.releaseCount },
+        label === 'rollback'
+          ? { destroy: 1, release: 0 }
+          : { destroy: 0, release: 1 },
+      );
       assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
     });
   }
@@ -557,9 +612,39 @@ test('rolls back failed deletes without removing the old file', async (context) 
       );
       assert.equal(harness.events.includes('rollback'), true);
       assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
+      assert.equal(harness.destroyCount, 0);
       assert.equal(harness.releaseCount, 1);
     });
   }
+
+  await context.test('rollback failure destroys the connection', async () => {
+    const primaryError = new Error('update failed');
+    const rollbackError = new Error('rollback failed');
+    const harness = createHarness({
+      lockedRows: [productRow({ imagePath: oldImagePath })],
+      reloadRows: [productRow({ imagePath: null })],
+      failures: { update: primaryError, rollback: rollbackError },
+    });
+
+    await assert.rejects(
+      createService(harness).remove(maximumId),
+      (error) =>
+        error instanceof AggregateError &&
+        error.cause === primaryError &&
+        error.errors[0] === primaryError &&
+        error.errors[1] === rollbackError,
+    );
+    assert.deepEqual(
+      { destroy: harness.destroyCount, release: harness.releaseCount },
+      { destroy: 1, release: 0 },
+    );
+    assert.deepEqual(harness.events.slice(-3), [
+      'updateProduct',
+      'rollback',
+      'destroy',
+    ]);
+    assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
+  });
 
   await context.test('ambiguous commit', async () => {
     const commitError = Object.assign(new Error('commit acknowledgement lost'), {

@@ -14,6 +14,7 @@ function categoryRow(overrides = {}) {
   return {
     id: 1,
     name: 'نوشیدنی گرم',
+    imagePath: null,
     sortOrder: 2,
     isVisible: 1,
     createdAt: timestamp,
@@ -41,6 +42,7 @@ test('lists categories in display order and maps the public contract', async () 
     {
       id: '1',
       name: 'نوشیدنی گرم',
+      imagePath: null,
       sortOrder: 2,
       isVisible: true,
       createdAt: timestamp.toISOString(),
@@ -166,19 +168,30 @@ test('updates only fixed columns with parameters and reloads unchanged rows safe
 test('returns safe not-found and dependent-category delete errors', async (context) => {
   await context.test('successful parameterized delete', async () => {
     const calls = [];
-    const service = createAdminCategoriesService({
-      executor: {
-        async execute(sql, parameters) {
-          calls.push({ sql, parameters });
-          return [{ affectedRows: 1 }, []];
-        },
+    const connection = {
+      async beginTransaction() {},
+      async execute(sql, parameters) {
+        calls.push({ sql, parameters });
+
+        if (sql.startsWith('SELECT') && sql.includes('FROM categories')) {
+          return [[categoryRow({ id: 7 })], []];
+        }
+
+        return [{ affectedRows: 1 }, []];
       },
+      async commit() {},
+      async rollback() {},
+      release() {},
+    };
+    const service = createAdminCategoriesService({
+      executor: { async getConnection() { return connection; } },
     });
 
     await service.remove('7');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].sql, 'DELETE FROM categories WHERE id = ?');
-    assert.deepEqual(calls[0].parameters, ['7']);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].sql, /FOR UPDATE$/u);
+    assert.equal(calls[1].sql, 'DELETE FROM categories WHERE id = ?');
+    assert.deepEqual(calls[1].parameters, ['7']);
   });
 
   await context.test('not found update', async () => {
@@ -197,8 +210,14 @@ test('returns safe not-found and dependent-category delete errors', async (conte
   });
 
   await context.test('not found delete', async () => {
+    const connection = {
+      async beginTransaction() {},
+      async execute() { return [[], []]; },
+      async rollback() {},
+      release() {},
+    };
     const service = createAdminCategoriesService({
-      executor: { async execute() { return [{ affectedRows: 0 }, []]; } },
+      executor: { async getConnection() { return connection; } },
     });
 
     await assert.rejects(
@@ -208,15 +227,23 @@ test('returns safe not-found and dependent-category delete errors', async (conte
   });
 
   await context.test('category with menu items', async () => {
-    const service = createAdminCategoriesService({
-      executor: {
-        async execute() {
-          throw Object.assign(new Error('foreign key details'), {
-            code: 'ER_ROW_IS_REFERENCED_2',
-            errno: 1451,
-          });
-        },
+    const connection = {
+      async beginTransaction() {},
+      async execute(sql) {
+        if (sql.startsWith('SELECT') && sql.includes('FROM categories')) {
+          return [[categoryRow({ id: 7 })], []];
+        }
+
+        throw Object.assign(new Error('foreign key details'), {
+          code: 'ER_ROW_IS_REFERENCED_2',
+          errno: 1451,
+        });
       },
+      async rollback() {},
+      release() {},
+    };
+    const service = createAdminCategoriesService({
+      executor: { async getConnection() { return connection; } },
     });
 
     await assert.rejects(

@@ -1,3 +1,9 @@
+import { categoryImageStorage as defaultCategoryImageStorage } from '../storage/categoryImages.storage.js';
+import {
+  logCategoryImageCleanupFailure,
+  removeCategoryImageAfterCommit,
+} from './categoryImageCleanup.js';
+
 export const maximumCategoryNameCharacters = 100;
 
 const maximumUnsignedBigInt = 18_446_744_073_709_551_615n;
@@ -129,6 +135,10 @@ function toCategory(row) {
   return {
     id: String(row.id),
     name: row.name,
+    imagePath:
+      row.imagePath === null || row.imagePath === undefined
+        ? null
+        : String(row.imagePath),
     sortOrder: Number(row.sortOrder),
     isVisible: Number(row.isVisible) === 1,
     createdAt: normalizeTimestamp(row.createdAt),
@@ -152,29 +162,122 @@ function duplicateNameError() {
   );
 }
 
-function categoryNotFoundError() {
+export function createCategoryNotFoundError() {
   return createCategoryError('Category not found', 'CATEGORY_NOT_FOUND', 404);
 }
 
-async function selectCategoryById(executor, categoryId) {
+export async function selectCategoryById(
+  executor,
+  categoryId,
+  { forUpdate = false } = {},
+) {
   const [rows] = await executor.execute(
-    `SELECT id, name, display_order AS sortOrder, is_visible AS isVisible,
+    `SELECT CAST(id AS CHAR) AS id, name, image_path AS imagePath,
+            display_order AS sortOrder, is_visible AS isVisible,
             created_at AS createdAt, updated_at AS updatedAt
        FROM categories
       WHERE id = ?
-      LIMIT 1`,
+      LIMIT 1${forUpdate ? ' FOR UPDATE' : ''}`,
     [categoryId],
   );
 
   return rows[0] ? toCategory(rows[0]) : null;
 }
 
-export function createAdminCategoriesService({ executor } = {}) {
+function categoryHasMenuItemsError() {
+  return createCategoryError(
+    'A category with menu items cannot be deleted',
+    'CATEGORY_HAS_MENU_ITEMS',
+    409,
+  );
+}
+
+function combineDeleteErrors(primaryError, cleanupErrors) {
+  if (cleanupErrors.length === 0) {
+    return primaryError;
+  }
+
+  const combinedError = new AggregateError(
+    [primaryError, ...cleanupErrors],
+    'Category deletion failed and cleanup was incomplete.',
+    { cause: primaryError },
+  );
+
+  combinedError.code = cleanupErrors.some(
+    (error) => error?.code === 'CATEGORY_DELETE_COMMIT_OUTCOME_UNKNOWN',
+  )
+    ? 'CATEGORY_DELETE_COMMIT_OUTCOME_UNKNOWN'
+    : (primaryError?.code ?? 'CATEGORY_DELETE_FAILED');
+  return combinedError;
+}
+
+function ambiguousDeleteCommitOutcomeError() {
+  const error = new Error('Category deletion commit outcome could not be determined.');
+  error.code = 'CATEGORY_DELETE_COMMIT_OUTCOME_UNKNOWN';
+  return error;
+}
+
+async function closeDeleteConnection(
+  connection,
+  cleanupErrors,
+  { discard = false } = {},
+) {
+  if (!connection) {
+    return false;
+  }
+
+  try {
+    if (discard && typeof connection.destroy === 'function') {
+      await connection.destroy();
+      return true;
+    }
+
+    await connection.release();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  return false;
+}
+
+async function verifyCategoryDeleteCommitOutcome(
+  databaseExecutor,
+  categoryId,
+  previousImagePath,
+) {
+  const verificationErrors = [];
+  let connection = null;
+  let outcome = 'unknown';
+
+  try {
+    connection = await databaseExecutor.getConnection();
+    const category = await selectCategoryById(connection, categoryId);
+
+    if (!category) {
+      outcome = 'committed';
+    } else if (category.imagePath === previousImagePath) {
+      outcome = 'not-committed';
+    }
+  } catch (error) {
+    verificationErrors.push(error);
+  } finally {
+    await closeDeleteConnection(connection, verificationErrors);
+  }
+
+  return { outcome, verificationErrors };
+}
+
+export function createAdminCategoriesService({
+  executor,
+  categoryImageStorage = defaultCategoryImageStorage,
+  logger = console,
+} = {}) {
   return Object.freeze({
     async list() {
       const databaseExecutor = executor ?? (await getDefaultExecutor());
       const [rows] = await databaseExecutor.execute(
-        `SELECT id, name, display_order AS sortOrder, is_visible AS isVisible,
+        `SELECT CAST(id AS CHAR) AS id, name, image_path AS imagePath,
+                display_order AS sortOrder, is_visible AS isVisible,
                 created_at AS createdAt, updated_at AS updatedAt
            FROM categories
           ORDER BY display_order ASC, id ASC`,
@@ -255,7 +358,7 @@ export function createAdminCategoriesService({ executor } = {}) {
       const updatedCategory = await selectCategoryById(databaseExecutor, categoryId);
 
       if (!updatedCategory) {
-        throw categoryNotFoundError();
+        throw createCategoryNotFoundError();
       }
 
       return updatedCategory;
@@ -264,27 +367,123 @@ export function createAdminCategoriesService({ executor } = {}) {
     async remove(categoryIdValue) {
       const categoryId = parseCategoryId(categoryIdValue);
       const databaseExecutor = executor ?? (await getDefaultExecutor());
-      let result;
+      let connection = null;
+      let previousImagePath = null;
+      let primaryError = null;
+      let transactionStarted = false;
+      let commitAttempted = false;
+      let commitSucceeded = false;
+      let canVerifyCommit = false;
+      let verifiedCommitted = false;
+      let rollbackFailed = false;
+      const cleanupErrors = [];
 
       try {
-        [result] = await databaseExecutor.execute('DELETE FROM categories WHERE id = ?', [
-          categoryId,
-        ]);
-      } catch (error) {
-        if (isReferencedCategoryError(error)) {
-          throw createCategoryError(
-            'A category with menu items cannot be deleted',
-            'CATEGORY_HAS_MENU_ITEMS',
-            409,
-          );
+        connection = await databaseExecutor.getConnection();
+        await connection.beginTransaction();
+        transactionStarted = true;
+        const category = await selectCategoryById(connection, categoryId, {
+          forUpdate: true,
+        });
+
+        if (!category) {
+          throw createCategoryNotFoundError();
         }
 
-        throw error;
+        previousImagePath = category.imagePath;
+        const [result] = await connection.execute(
+          'DELETE FROM categories WHERE id = ?',
+          [categoryId],
+        );
+
+        if (Number(result.affectedRows) === 0) {
+          throw createCategoryNotFoundError();
+        }
+
+        commitAttempted = true;
+        await connection.commit();
+        commitSucceeded = true;
+        transactionStarted = false;
+      } catch (error) {
+        primaryError = isReferencedCategoryError(error)
+          ? categoryHasMenuItemsError()
+          : error;
+
+        if (transactionStarted && !commitAttempted) {
+          try {
+            await connection.rollback();
+            transactionStarted = false;
+          } catch (rollbackError) {
+            cleanupErrors.push(rollbackError);
+            rollbackFailed = true;
+          }
+        }
+      } finally {
+        if (connection) {
+          if (commitSucceeded) {
+            const releaseErrors = [];
+            await closeDeleteConnection(connection, releaseErrors);
+
+            for (const releaseError of releaseErrors) {
+              logCategoryImageCleanupFailure(
+                logger,
+                'release-connection',
+                releaseError,
+              );
+            }
+          } else {
+            canVerifyCommit = await closeDeleteConnection(
+              connection,
+              cleanupErrors,
+              { discard: commitAttempted || rollbackFailed },
+            );
+          }
+        }
       }
 
-      if (Number(result.affectedRows) === 0) {
-        throw categoryNotFoundError();
+      if (primaryError) {
+        if (commitAttempted && canVerifyCommit) {
+          const { outcome, verificationErrors } =
+            await verifyCategoryDeleteCommitOutcome(
+              databaseExecutor,
+              categoryId,
+              previousImagePath,
+            );
+          cleanupErrors.push(...verificationErrors);
+
+          if (outcome === 'committed') {
+            verifiedCommitted = true;
+          } else if (outcome === 'unknown') {
+            cleanupErrors.push(ambiguousDeleteCommitOutcomeError());
+          }
+        } else if (commitAttempted) {
+          cleanupErrors.push(ambiguousDeleteCommitOutcomeError());
+        }
+
+        if (!verifiedCommitted) {
+          throw combineDeleteErrors(primaryError, cleanupErrors);
+        }
+
+        logCategoryImageCleanupFailure(
+          logger,
+          'commit-acknowledgement',
+          primaryError,
+        );
+
+        for (const cleanupError of cleanupErrors) {
+          logCategoryImageCleanupFailure(
+            logger,
+            'verification-connection',
+            cleanupError,
+          );
+        }
       }
+
+      await removeCategoryImageAfterCommit(
+        categoryImageStorage,
+        previousImagePath,
+        logger,
+      );
     },
   });
 }

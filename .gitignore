@@ -28,3 +28,4 @@ dist-ssr
 
 # Runtime uploads
 /server/uploads/products/
+/server/uploads/categories/

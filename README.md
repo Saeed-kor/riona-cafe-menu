@@ -28,6 +28,37 @@ npm run dev
 For production-style execution, use `npm start`. The database-backed health check
 is available at `http://localhost:3000/api/health`.
 
+## Production deployment contract
+
+The frontend deliberately uses root-relative `/api/...` URLs for application
+requests and root-relative `/uploads/...` URLs for managed images. A production
+deployment must therefore serve the frontend and backend through the same HTTPS
+origin at the domain root.
+
+The edge server or reverse proxy must apply these routes before the frontend's
+SPA fallback:
+
+- Forward `/api` and every `/api/...` request to the Express backend.
+- Forward `/uploads` and every `/uploads/...` request to the Express backend.
+- Preserve the original method, complete path (including the `/api` or
+  `/uploads` prefix), and query string. Do not rewrite or strip either prefix.
+- Send every other frontend route, including known Admin routes, to the built
+  `dist/index.html` SPA entry point as appropriate.
+
+HTTPS is required in production because the Admin session cookie is `Secure`.
+The cookie is also `HttpOnly` and `SameSite=Lax`; the frontend's credentialed
+requests rely on the documented same-origin topology. Vite's configured proxy is
+for the local development server only. Publishing the static `dist` directory
+without the two production proxy routes is insufficient: authentication, API
+calls, and uploaded images will not work.
+
+A cross-origin frontend/backend deployment is not supported by the current
+contract. Supporting it would require a coordinated redesign of API base URLs,
+image URLs, cookie `SameSite`/`Secure` behavior, and backend CORS policy. Do not
+put database credentials, session secrets, API keys, or other private values in
+Vite configuration or `VITE_*` variables; frontend environment values are
+included in the browser bundle.
+
 ## Database setup
 
 Start XAMPP and MariaDB, then run the versioned database migrations before

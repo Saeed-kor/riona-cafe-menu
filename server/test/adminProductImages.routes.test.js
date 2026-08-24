@@ -45,7 +45,7 @@ function product(overrides = {}) {
     name: 'Espresso',
     description: null,
     price: '125000',
-    imagePath: null,
+    imagePath: `/uploads/products/${'ef'.repeat(16)}.webp`,
     sortOrder: 0,
     isAvailable: true,
     isVisible: true,
@@ -142,7 +142,7 @@ test('authenticates before multipart parsing and applies no-store to 401', async
   assert.equal(serviceCalls, 0);
 });
 
-test('uploads and deletes product images through the real middleware stack', async (context) => {
+test('uploads images and rejects independent deletion through the real middleware stack', async (context) => {
   const calls = [];
   let authCalls = 0;
   const uploadedProduct = product({ imagePath: `/uploads/products/${'ab'.repeat(16)}.png` });
@@ -186,16 +186,13 @@ test('uploads and deletes product images through the real middleware stack', asy
     { method: 'DELETE', headers: { cookie: validCookie } },
   );
 
-  assert.equal(deleteResponse.status, 200);
+  assert.equal(deleteResponse.status, 409);
   assert.equal(deleteResponse.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await deleteResponse.json(), {
-    success: true,
-    product: product(),
+    success: false,
+    message: 'Product image is required; replace the image instead',
   });
-  assert.deepEqual(calls[1], {
-    operation: 'remove',
-    id: '18446744073709551615',
-  });
+  assert.equal(calls.length, 1);
   assert.equal(authCalls, 2);
 });
 
@@ -470,10 +467,7 @@ test('maps missing products to 404 and hides internal errors behind no-store 500
   const missingServer = await startTestServer(missingApp);
   context.after(missingServer.close);
 
-  for (const [method, body] of [
-    ['PUT', imageForm()],
-    ['DELETE', undefined],
-  ]) {
+  for (const [method, body] of [['PUT', imageForm()]]) {
     const response = await fetch(`${missingServer.baseUrl}/api/admin/products/7/image`, {
       method,
       headers: { cookie: validCookie },
@@ -486,6 +480,16 @@ test('maps missing products to 404 and hides internal errors behind no-store 500
       message: 'Product not found',
     });
   }
+
+  const forbiddenDelete = await fetch(
+    `${missingServer.baseUrl}/api/admin/products/7/image`,
+    { method: 'DELETE', headers: { cookie: validCookie } },
+  );
+  assert.equal(forbiddenDelete.status, 409);
+  assert.deepEqual(await forbiddenDelete.json(), {
+    success: false,
+    message: 'Product image is required; replace the image instead',
+  });
 
   const internalApp = createApp({
     adminAuthService: createAuthService(),

@@ -2192,6 +2192,12 @@ test('canonicalizes every known trailing slash exactly once without losing searc
       search: '?sort=manual',
       hash: '#category-list',
     },
+    {
+      canonicalPath: '/admin/products',
+      source: '/admin/products/?sort=manual#product-list',
+      search: '?sort=manual',
+      hash: '#product-list',
+    },
   ]
 
   for (const routeCase of cases) {
@@ -2259,6 +2265,7 @@ test('renders stable Admin 404 pages without auth requests or protected content'
     '/admin/unknown',
     '/admin/login-extra',
     '/admin/categories-extra',
+    '/admin/products-extra',
   ]) {
     await context.test(pathname, async () => {
       let requestCount = 0

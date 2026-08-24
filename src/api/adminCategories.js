@@ -40,8 +40,8 @@ export function createAdminCategoriesApi(fetchImplementation = globalThis.fetch)
   }
 
   return Object.freeze({
-    async list() {
-      const payload = await request()
+    async list({ signal } = {}) {
+      const payload = await request('', { signal })
       return payload.categories
     },
 

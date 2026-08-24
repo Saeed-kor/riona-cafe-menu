@@ -11,6 +11,8 @@ const { adminSessionCookieName } = await import('../src/routes/adminAuth.routes.
 const { createAdminProductsService } = await import(
   '../src/services/adminProducts.service.js'
 );
+const { createValidPng } = await import('../test-support/productImageFixtures.js');
+const validPng = await createValidPng();
 
 const validToken = 'a'.repeat(64);
 const validCookie = `${adminSessionCookieName}=${validToken}`;
@@ -53,7 +55,7 @@ function product(overrides = {}) {
     name: 'قهوه',
     description: 'قهوه تازه‌دم',
     price: '125000',
-    imagePath: null,
+    imagePath: `/uploads/products/${'ef'.repeat(16)}.webp`,
     sortOrder: 0,
     isAvailable: true,
     isVisible: true,
@@ -70,6 +72,34 @@ function jsonRequest(method, body, authenticated = true) {
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
+}
+
+function createProductForm(metadata, {
+  includeMetadata = true,
+  includeImage = true,
+  imageField = 'image',
+  secondMetadata = false,
+  secondImage = false,
+  metadataField = 'metadata',
+  imageBlob = new Blob([validPng], { type: 'image/png' }),
+  imageName = 'product.png',
+} = {}) {
+  const form = new FormData();
+
+  if (includeMetadata) {
+    const serialized = typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+    form.append(metadataField, serialized);
+    if (secondMetadata) form.append(metadataField, serialized);
+  }
+
+  if (includeImage) {
+    form.append(imageField, imageBlob, imageName);
+    if (secondImage) {
+      form.append(imageField, new Blob([validPng], { type: 'image/png' }), 'second.png');
+    }
+  }
+
+  return form;
 }
 
 test('every product operation requires a valid admin session', async (context) => {
@@ -110,7 +140,10 @@ test('product routes expose the CRUD response contract through real middleware',
   let authCalls = 0;
   const productsService = {
     async list() { return products; },
-    async create(body) { return product({ id: '2', ...body, categoryId: String(body.categoryId) }); },
+    async create(body, image) {
+      assert.equal(image.mimeType, 'image/png');
+      return product({ id: '2', ...body, categoryId: String(body.categoryId) });
+    },
     async update(id, body) { return product({ id, ...body }); },
     async remove() {},
   };
@@ -131,15 +164,19 @@ test('product routes expose the CRUD response contract through real middleware',
 
   const createResponse = await fetch(
     `${server.baseUrl}/api/admin/products`,
-    jsonRequest('POST', {
-      categoryId: 2,
+    {
+      method: 'POST',
+      headers: { cookie: validCookie },
+      body: createProductForm({
+      categoryId: '2',
       name: 'چای',
       description: null,
       price: '85000',
       sortOrder: 3,
       isAvailable: true,
       isVisible: true,
-    }),
+      }),
+    },
   );
   assert.equal(createResponse.status, 201);
   assert.equal(authCalls, 2);
@@ -196,26 +233,34 @@ test('product routes map validation and missing records to safe responses', asyn
   };
   const app = createApp({
     adminAuthService: createAuthService(),
-    adminProductsService: createAdminProductsService({ executor }),
+    adminProductsService: createAdminProductsService({
+      executor,
+      productImageStorage: {
+        async store() {
+          return { publicPath: `/uploads/products/${'ef'.repeat(16)}.webp` };
+        },
+        async remove() { return true; },
+      },
+    }),
   });
   const server = await startTestServer(app);
   context.after(server.close);
 
   const invalidBody = await fetch(
     `${server.baseUrl}/api/admin/products`,
-    jsonRequest('POST', { categoryId: 2, name: '', price: '100' }),
+    { method: 'POST', headers: { cookie: validCookie }, body: createProductForm({ categoryId: '2', name: '', price: '100' }) },
   );
   assert.equal(invalidBody.status, 400);
 
   const callsBeforeUnknownField = databaseCalls;
   const unknownField = await fetch(
     `${server.baseUrl}/api/admin/products`,
-    jsonRequest('POST', {
-      categoryId: 2,
+    { method: 'POST', headers: { cookie: validCookie }, body: createProductForm({
+      categoryId: '2',
       name: 'قهوه',
       price: '100',
       image_path: '/unsafe/path',
-    }),
+    }) },
   );
   assert.equal(unknownField.status, 400);
   assert.equal(databaseCalls, callsBeforeUnknownField);
@@ -228,7 +273,7 @@ test('product routes map validation and missing records to safe responses', asyn
 
   const missingCategory = await fetch(
     `${server.baseUrl}/api/admin/products`,
-    jsonRequest('POST', { categoryId: 99, name: 'قهوه', price: '100' }),
+    { method: 'POST', headers: { cookie: validCookie }, body: createProductForm({ categoryId: '99', name: 'قهوه', price: '100' }) },
   );
   assert.equal(missingCategory.status, 400);
   assert.deepEqual(await missingCategory.json(), {
@@ -313,4 +358,138 @@ test('product routes forward explicitly safe typed service errors and hide inter
   } finally {
     console.error = originalConsoleError;
   }
+});
+
+test('enforces the exact atomic product create multipart shape', async (context) => {
+  let createCalls = 0;
+  const app = createApp({
+    adminAuthService: createAuthService(),
+    adminProductsService: {
+      async list() { return []; },
+      async create(metadata) {
+        createCalls += 1;
+        return product({ ...metadata, categoryId: String(metadata.categoryId) });
+      },
+    },
+  });
+  const server = await startTestServer(app);
+  context.after(server.close);
+  const metadata = { categoryId: '2', name: 'قهوه', price: '100' };
+
+  const jsonOnly = await fetch(
+    `${server.baseUrl}/api/admin/products`,
+    jsonRequest('POST', metadata),
+  );
+  assert.equal(jsonOnly.status, 415);
+
+  for (const body of [
+    createProductForm(metadata, { includeImage: false }),
+    createProductForm(metadata, { includeMetadata: false }),
+    createProductForm(metadata, { secondImage: true }),
+    createProductForm(metadata, { secondMetadata: true }),
+    createProductForm(metadata, { imageField: 'photo' }),
+    createProductForm(metadata, { metadataField: 'payload' }),
+    createProductForm('{invalid-json'),
+    createProductForm('null'),
+    createProductForm('[]'),
+    createProductForm('"primitive"'),
+  ]) {
+    const response = await fetch(`${server.baseUrl}/api/admin/products`, {
+      method: 'POST',
+      headers: { cookie: validCookie },
+      body,
+    });
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal((await response.json()).success, false);
+  }
+
+  assert.equal(createCalls, 0);
+});
+
+test('rejects invalid create images and metadata limits before calling the service', async (context) => {
+  let createCalls = 0;
+  const app = createApp({
+    adminAuthService: createAuthService(),
+    adminProductsService: {
+      async list() { return []; },
+      async create() { createCalls += 1; },
+    },
+  });
+  const server = await startTestServer(app);
+  context.after(server.close);
+  const metadata = { categoryId: '2', name: 'قهوه', price: '100' };
+  const cases = [
+    {
+      expectedStatus: 400,
+      body: createProductForm(metadata, {
+        imageBlob: new Blob([validPng], { type: 'image/jpeg' }),
+        imageName: 'spoofed.jpg',
+      }),
+    },
+    {
+      expectedStatus: 400,
+      body: createProductForm(metadata, { imageName: 'wrong-extension.jpg' }),
+    },
+    {
+      expectedStatus: 400,
+      body: createProductForm(metadata, {
+        imageBlob: new Blob([Buffer.from('not a decodable png')], { type: 'image/png' }),
+      }),
+    },
+    {
+      expectedStatus: 413,
+      body: createProductForm(metadata, {
+        imageBlob: new Blob([new Uint8Array((5 * 1024 * 1024) + 1)], { type: 'image/png' }),
+      }),
+    },
+    {
+      expectedStatus: 400,
+      body: createProductForm('x'.repeat((16 * 1024) + 1)),
+    },
+  ];
+
+  for (const { body, expectedStatus } of cases) {
+    const response = await fetch(`${server.baseUrl}/api/admin/products`, {
+      method: 'POST',
+      headers: { cookie: validCookie },
+      body,
+    });
+    assert.equal(response.status, expectedStatus);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal((await response.json()).success, false);
+  }
+
+  assert.equal(createCalls, 0);
+});
+
+test('authenticates product creation before parsing malformed or oversized multipart data', async (context) => {
+  let createCalls = 0;
+  const app = createApp({
+    adminAuthService: createAuthService(),
+    adminProductsService: {
+      async create() { createCalls += 1; },
+    },
+  });
+  const server = await startTestServer(app);
+  context.after(server.close);
+
+  const response = await fetch(`${server.baseUrl}/api/admin/products`, {
+    method: 'POST',
+    headers: { 'content-type': 'multipart/form-data; boundary=broken' },
+    body: '--broken\r\nprivate payload',
+  });
+  assert.equal(response.status, 401);
+
+  const oversizedResponse = await fetch(`${server.baseUrl}/api/admin/products`, {
+    method: 'POST',
+    body: createProductForm(
+      { categoryId: '2', name: 'قهوه', price: '100' },
+      {
+        imageBlob: new Blob([new Uint8Array((5 * 1024 * 1024) + 2)], { type: 'image/png' }),
+      },
+    ),
+  });
+  assert.equal(oversizedResponse.status, 401);
+  assert.equal(createCalls, 0);
 });

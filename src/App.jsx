@@ -734,7 +734,12 @@ function App() {
     return <AdminLogin onLogin={handleLogin} />
   }
 
-  if ((pathname === '/admin' || pathname === '/admin/categories') && auth.admin) {
+  if (
+    (pathname === '/admin' ||
+      pathname === '/admin/categories' ||
+      pathname === '/admin/products') &&
+    auth.admin
+  ) {
     return (
       <AdminPanel
         admin={auth.admin}

@@ -27,14 +27,6 @@ function productNotFoundError() {
 }
 
 async function updateProductImagePath(connection, productId, imagePath) {
-  if (imagePath === null) {
-    await connection.execute(
-      'UPDATE menu_items SET image_path = NULL WHERE id = ?',
-      [productId],
-    );
-    return;
-  }
-
   await connection.execute(
     'UPDATE menu_items SET image_path = ? WHERE id = ?',
     [imagePath, productId],
@@ -46,7 +38,7 @@ export function createAdminProductImagesService({
   storage = defaultStorage,
   logger = console,
 } = {}) {
-  return createAdminEntityImagesService({
+  const imageService = createAdminEntityImagesService({
     executor,
     getDefaultExecutor,
     storage,
@@ -61,6 +53,19 @@ export function createAdminProductImagesService({
     unknownCommitCode: 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN',
     replaceReloadErrorMessage: 'Updated product image could not be loaded.',
     removeReloadErrorMessage: 'Product without image could not be loaded.',
+    resolveVerifiedReplaceCommit: true,
+    discardOnRollbackFailure: true,
+  });
+
+  return Object.freeze({
+    replace: imageService.replace,
+    async remove() {
+      const error = new Error('Product image is required; replace the image instead');
+      error.code = 'PRODUCT_IMAGE_REQUIRED';
+      error.status = 409;
+      error.isSafeToDisplay = true;
+      throw error;
+    },
   });
 }
 

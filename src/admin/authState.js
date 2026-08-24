@@ -17,6 +17,7 @@ const canonicalAdminPaths = Object.freeze({
   '/admin/': '/admin',
   '/admin/login/': '/admin/login',
   '/admin/categories/': '/admin/categories',
+  '/admin/products/': '/admin/products',
 })
 
 export function resolveAdminRoute(pathname) {
@@ -30,7 +31,11 @@ export function resolveAdminRoute(pathname) {
     return { kind: adminRouteKind.login, canonicalPath: null }
   }
 
-  if (pathname === '/admin' || pathname === '/admin/categories') {
+  if (
+    pathname === '/admin' ||
+    pathname === '/admin/categories' ||
+    pathname === '/admin/products'
+  ) {
     return { kind: adminRouteKind.protected, canonicalPath: null }
   }
 

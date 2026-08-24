@@ -49,12 +49,6 @@ function createExecutor(initialImagePath = null) {
         return [{ affectedRows: 1, changedRows: 1 }, []];
       }
 
-      if (sql === 'UPDATE menu_items SET image_path = NULL WHERE id = ?') {
-        assert.deepEqual(parameters, [productId]);
-        pendingImagePath = null;
-        return [{ affectedRows: 1, changedRows: 1 }, []];
-      }
-
       throw new Error(`Unexpected filesystem integration SQL: ${sql}`);
     },
     async commit() {
@@ -128,7 +122,7 @@ function absolutePath(storage, publicPath) {
   return resolved;
 }
 
-test('creates, replaces, and deletes real product image files through the service', async (context) => {
+test('creates and replaces real files while refusing independent image deletion', async (context) => {
   const { root, storage } = await createTemporaryStorage(context);
   const database = createExecutor();
   const service = createAdminProductImagesService({
@@ -155,12 +149,21 @@ test('creates, replaces, and deletes real product image files through the servic
   await access(absolutePath(storage, secondPath));
   assert.equal(database.state.imagePath, secondPath);
 
-  const removed = await service.remove(productId);
-  assert.equal(removed.imagePath, null);
-  assert.equal(database.state.imagePath, null);
-  await assert.rejects(access(absolutePath(storage, secondPath)), (error) => error.code === 'ENOENT');
+  await assert.rejects(
+    service.remove(productId),
+    (error) =>
+      error.code === 'PRODUCT_IMAGE_REQUIRED' &&
+      error.status === 409 &&
+      error.isSafeToDisplay === true &&
+      error.message === 'Product image is required; replace the image instead',
+  );
+  assert.equal(database.state.imagePath, secondPath);
+  await access(absolutePath(storage, secondPath));
   assert.deepEqual(await readdir(path.join(root, '.tmp')), []);
-  assert.deepEqual(await readdir(root), ['.tmp']);
+  assert.deepEqual((await readdir(root)).sort(), [
+    '.tmp',
+    path.basename(absolutePath(storage, secondPath)),
+  ].sort());
 });
 
 test('keeps the active file and removes the staged replacement after commit failure', async (context) => {
@@ -215,15 +218,13 @@ test('keeps the newly referenced file when COMMIT is durable but its promise rej
   database.failures.commit = commitError;
   database.failures.commitAppliedBeforeError = true;
 
-  await assert.rejects(
-    service.replace(productId, {
-      buffer: Buffer.from('durably referenced replacement'),
-      extension: '.png',
-    }),
-    (error) => error === commitError,
-  );
+  const verified = await service.replace(productId, {
+    buffer: Buffer.from('durably referenced replacement'),
+    extension: '.png',
+  });
 
   const committedPath = `/uploads/products/${'02'.repeat(16)}.png`;
+  assert.equal(verified.imagePath, committedPath);
   assert.equal(database.state.imagePath, committedPath);
   await access(absolutePath(storage, committedPath));
   await assert.rejects(

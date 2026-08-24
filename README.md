@@ -71,10 +71,30 @@ npm run admin:create
 ```
 
 Running migrations again is safe: migrations that were already applied are
-skipped. The administrator command collects the username and password
+skipped. Migration `004_require_product_image` stops before changing the schema
+if an existing product has no image; assign an image to every existing product
+before retrying it. The administrator command collects the username and password
 interactively, hides password input, and never stores credentials in project
-files or prints them. This stage creates nullable image-path columns only; it
-does not upload image files.
+files or prints them.
+
+## Admin product contract
+
+Product prices are integer **Toman** values from database to UI. The database
+stores the integer without Rial/Toman conversion, API responses expose `price`
+as a canonical decimal string, and the frontend keeps that string intact so
+unsigned `BIGINT` values never lose precision. Zero is valid; negative,
+fractional, exponent, signed, leading-zero, and out-of-range values are not.
+
+`isVisible` and `isAvailable` are independent. A hidden product is omitted from
+the future public menu. A visible and available product is shown normally, while
+a visible but unavailable product remains visible with an «ناموجود» label. The
+public Menu API and public Menu UI are not part of this branch.
+
+Every product has exactly one required managed image. Admin creation uses one
+atomic `multipart/form-data` request with a JSON text field named `metadata` and
+one file field named `image`. Replacing that image is supported; deleting it
+independently is rejected because it would break the product invariant. Deleting
+the product also schedules cleanup of its managed image.
 
 Run the backend regression tests with `npm test` from `server`. Database
 integration tests are destructive and are skipped unless

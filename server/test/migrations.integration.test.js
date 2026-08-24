@@ -13,6 +13,7 @@ import {
   up as enforceUniqueCategoryNames,
   validateCategoryManagementSchema,
 } from '../src/db/migrations/003_enforce_unique_category_names.js';
+import { validateRequiredProductImageSchema } from '../src/db/migrations/004_require_product_image.js';
 import {
   authorizeIntegrationDatabase,
   releaseIntegrationDatabaseLock,
@@ -454,10 +455,11 @@ test(
         '001_create_core_tables',
         '002_create_admin_sessions',
         '003_enforce_unique_category_names',
+        '004_require_product_image',
       ]);
-      await validateCoreSchema(connection, testDatabaseName, false);
       await validateAdminSessionsSchema(connection, testDatabaseName, false);
       await validateCategoryManagementSchema(connection, testDatabaseName, false);
+      await validateRequiredProductImageSchema(connection, testDatabaseName);
     });
 
     await context.test('serializes two concurrent migration runners', async () => {
@@ -472,10 +474,11 @@ test(
         '001_create_core_tables',
         '002_create_admin_sessions',
         '003_enforce_unique_category_names',
+        '004_require_product_image',
       ]);
-      await validateCoreSchema(connection, testDatabaseName, false);
       await validateAdminSessionsSchema(connection, testDatabaseName, false);
       await validateCategoryManagementSchema(connection, testDatabaseName, false);
+      await validateRequiredProductImageSchema(connection, testDatabaseName);
     });
     } catch (error) {
       primaryError = error;

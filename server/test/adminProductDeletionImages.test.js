@@ -44,6 +44,7 @@ function createDeleteHarness({
   const state = { productExists: true };
   let pendingDelete = false;
   let releaseCount = 0;
+  let connectionCount = 0;
   const connection = {
     async beginTransaction() {
       events.push('beginTransaction');
@@ -95,11 +96,23 @@ function createDeleteHarness({
       if (failures.release) throw failures.release;
     },
   };
+  const verificationConnection = {
+    async execute(sql, parameters) {
+      events.push('verifyProduct');
+      queries.push({ sql, parameters });
+      if (failures.verification) throw failures.verification;
+      return [state.productExists ? lockedRows : [], []];
+    },
+    release() {
+      events.push('releaseVerification');
+    },
+  };
   const executor = {
     async getConnection() {
       events.push('getConnection');
       if (failures.getConnection) throw failures.getConnection;
-      return connection;
+      connectionCount += 1;
+      return connectionCount === 1 ? connection : verificationConnection;
     },
     async execute() {
       throw new Error('Product deletion must not query through the pool.');
@@ -195,7 +208,7 @@ test('preserves the image and primary error on every pre-commit failure', async 
   }
 });
 
-test('preserves the image when product deletion COMMIT has an ambiguous result', async () => {
+test('resolves a durable delete after commit acknowledgement loss', async () => {
   const commitError = Object.assign(new Error('commit acknowledgement lost'), {
     code: 'ECONNRESET',
   });
@@ -206,6 +219,26 @@ test('preserves the image when product deletion COMMIT has an ambiguous result',
     },
   });
 
+  await createService(harness).remove(maximumId);
+
+  assert.equal(harness.state.productExists, false);
+  assert.equal(harness.events.includes('rollback'), false);
+  assert.equal(harness.events.includes('destroy'), true);
+  assert.equal(
+    harness.events.some((event) => event.startsWith('remove:')),
+    true,
+  );
+});
+
+test('preserves the product image when delete reconciliation is unknown', async () => {
+  const commitError = new Error('commit acknowledgement lost');
+  const harness = createDeleteHarness({
+    failures: {
+      commit: commitError,
+      verification: new Error('verification unavailable'),
+    },
+  });
+
   await assert.rejects(
     createService(harness).remove(maximumId),
     (error) =>
@@ -213,25 +246,19 @@ test('preserves the image when product deletion COMMIT has an ambiguous result',
       error.code === 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN' &&
       error.cause === commitError,
   );
-
-  assert.equal(harness.state.productExists, false);
-  assert.equal(harness.events.includes('rollback'), false);
-  assert.equal(harness.events.includes('destroy'), true);
   assert.equal(
     harness.events.some((event) => event.startsWith('remove:')),
     false,
   );
 });
 
-test('retains the primary delete error when rollback and release also fail', async () => {
+test('destroys a connection after rollback failure and retains the primary delete error', async () => {
   const primaryError = new Error('delete failed');
   const rollbackError = new Error('rollback failed');
-  const releaseError = new Error('release failed');
   const harness = createDeleteHarness({
     failures: {
       delete: primaryError,
       rollback: rollbackError,
-      release: releaseError,
     },
   });
 
@@ -242,9 +269,10 @@ test('retains the primary delete error when rollback and release also fail', asy
       error.cause === primaryError &&
       error.errors[0] === primaryError &&
       error.errors[1] === rollbackError &&
-      error.errors[2] === releaseError,
+      error.errors.length === 2,
   );
-  assert.equal(harness.releaseCount, 1);
+  assert.equal(harness.releaseCount, 0);
+  assert.equal(harness.events.includes('destroy'), true);
   assert.equal(
     harness.events.some((event) => event.startsWith('remove:')),
     false,
@@ -350,10 +378,7 @@ test('keeps a real managed file when product deletion commit is not acknowledged
 
   await assert.rejects(
     service.remove(maximumId),
-    (error) =>
-      error instanceof AggregateError &&
-      error.code === 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN' &&
-      error.cause === commitError,
+    (error) => error === commitError,
   );
   await access(absolutePath);
   assert.equal(harness.events.includes('rollback'), false);

@@ -57,7 +57,7 @@ function parseProductImage(request, response, next) {
 function sendProductImageError(error, response, next) {
   if (
     error?.isSafeToDisplay === true &&
-    [400, 404, 413].includes(error.status)
+    [400, 404, 409, 413].includes(error.status)
   ) {
     return response.status(error.status).json({
       success: false,
@@ -114,13 +114,16 @@ export function createAdminProductImagesRouter({
   router.delete(
     imageRoute,
     validateProductId,
-    async (request, response, next) => {
-      try {
-        const product = await productImagesService.remove(request.params.productId);
-        return response.status(200).json({ success: true, product });
-      } catch (error) {
-        return sendProductImageError(error, response, next);
-      }
+    (_request, response, next) => {
+      return sendProductImageError(
+        createProductImageError(
+          'Product image is required; replace the image instead',
+          'PRODUCT_IMAGE_REQUIRED',
+          409,
+        ),
+        response,
+        next,
+      );
     },
   );
 

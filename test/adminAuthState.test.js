@@ -21,6 +21,7 @@ test('auth state exposes the required four distinct states', () => {
 test('redirects an unauthenticated visitor from protected admin paths to login', () => {
   assert.equal(getAdminRedirect('/admin', adminAuthStatus.unauthenticated), '/admin/login')
   assert.equal(getAdminRedirect('/admin/categories', adminAuthStatus.unauthenticated), '/admin/login')
+  assert.equal(getAdminRedirect('/admin/products', adminAuthStatus.unauthenticated), '/admin/login')
   assert.equal(getAdminRedirect('/admin/login', adminAuthStatus.unauthenticated), null)
 })
 
@@ -48,6 +49,10 @@ test('classifies only exact admin routes and exposes known trailing-slash canoni
     kind: adminRouteKind.protected,
     canonicalPath: null,
   })
+  assert.deepEqual(resolveAdminRoute('/admin/products'), {
+    kind: adminRouteKind.protected,
+    canonicalPath: null,
+  })
   assert.deepEqual(resolveAdminRoute('/admin/'), {
     kind: adminRouteKind.canonical,
     canonicalPath: '/admin',
@@ -60,11 +65,16 @@ test('classifies only exact admin routes and exposes known trailing-slash canoni
     kind: adminRouteKind.canonical,
     canonicalPath: '/admin/categories',
   })
+  assert.deepEqual(resolveAdminRoute('/admin/products/'), {
+    kind: adminRouteKind.canonical,
+    canonicalPath: '/admin/products',
+  })
 
   for (const pathname of [
     '/admin/unknown',
     '/admin/login-extra',
     '/admin/categories-extra',
+    '/admin/products-extra',
     '/admin//categories',
   ]) {
     assert.equal(resolveAdminRoute(pathname).kind, adminRouteKind.notFound)

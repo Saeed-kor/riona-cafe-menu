@@ -2,12 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  createAdminProductsService,
+  createAdminProductsService as createProductionAdminProductsService,
   maximumProductDescriptionBytes,
   parseProductId,
   validateNewProduct,
   validateProductChanges,
 } from '../src/services/adminProducts.service.js';
+
+const managedImagePath = `/uploads/products/${'ef'.repeat(16)}.webp`;
+const validImage = Object.freeze({ buffer: Buffer.from('image'), extension: '.webp' });
+const defaultStorage = Object.freeze({
+  async store() { return { publicPath: managedImagePath }; },
+  async remove() { return true; },
+});
+
+function createAdminProductsService(options = {}) {
+  const service = createProductionAdminProductsService({
+    ...options,
+    productImageStorage: options.productImageStorage ?? defaultStorage,
+  });
+
+  return Object.freeze({
+    ...service,
+    create(body, image = validImage) {
+      return service.create(body, image);
+    },
+  });
+}
 
 function productRow(overrides = {}) {
   return {
@@ -17,7 +38,7 @@ function productRow(overrides = {}) {
     name: 'قهوه',
     description: 'قهوه تازه‌دم',
     price: '125000',
-    imagePath: null,
+    imagePath: managedImagePath,
     sortOrder: 3,
     isAvailable: 1,
     isVisible: 1,
@@ -36,6 +57,7 @@ function createTransactionHarness({
   const events = [];
   const queries = [];
   let releaseCount = 0;
+  let connectionCount = 0;
   const connection = {
     async beginTransaction() {
       events.push('beginTransaction');
@@ -111,6 +133,20 @@ function createTransactionHarness({
         throw failures.release;
       }
     },
+    destroy() {
+      events.push('destroy');
+    },
+  };
+  const verificationConnection = {
+    async execute(sql, parameters) {
+      events.push('verifyProduct');
+      queries.push({ sql, parameters });
+      if (failures.verification) throw failures.verification;
+      return [failures.commitVerificationRows ?? [], []];
+    },
+    release() {
+      events.push('releaseVerification');
+    },
   };
   const pool = {
     async getConnection() {
@@ -120,7 +156,8 @@ function createTransactionHarness({
         throw failures.getConnection;
       }
 
-      return connection;
+      connectionCount += 1;
+      return connectionCount === 1 ? connection : verificationConnection;
     },
     async execute() {
       throw new Error('Create must not execute a query through the pool.');
@@ -219,12 +256,13 @@ test('creates products atomically with exact unsigned BIGINT ids', async (contex
       ]);
       assert.equal(harness.releaseCount, 1);
       assert.equal(insert.sql.includes(injectedName.trim()), false);
-      assert.doesNotMatch(insert.sql, /image_path/);
+      assert.match(insert.sql, /image_path/);
       assert.deepEqual(insert.parameters, [
-        2,
+        '2',
         injectedName.trim(),
         null,
         '18446744073709551615',
+        managedImagePath,
         4,
         1,
         0,
@@ -442,12 +480,14 @@ test('handles failed product creates with the correct rollback and release seman
       'selectLastInsertId',
       'reloadProduct',
       'commit',
-      'rollback',
-      'release',
+      'destroy',
+      'getConnection',
+      'verifyProduct',
+      'releaseVerification',
     ]);
     assert.equal(harness.events.filter((event) => event === 'commit').length, 1);
-    assert.equal(harness.events.filter((event) => event === 'rollback').length, 1);
-    assert.equal(harness.releaseCount, 1);
+    assert.equal(harness.events.filter((event) => event === 'rollback').length, 0);
+    assert.equal(harness.releaseCount, 0);
   });
 
   await context.test('category foreign-key race', async () => {
@@ -476,15 +516,13 @@ test('handles failed product creates with the correct rollback and release seman
     assert.equal(harness.releaseCount, 1);
   });
 
-  await context.test('cleanup errors retain the original failure', async () => {
+  await context.test('rollback failure destroys the connection and retains the original failure', async () => {
     const primaryError = new Error('primary insert failure');
     const rollbackError = new Error('rollback failure');
-    const releaseError = new Error('release failure');
     const harness = createTransactionHarness({
       failures: {
         insert: primaryError,
         rollback: rollbackError,
-        release: releaseError,
       },
     });
     const service = createAdminProductsService({ executor: harness.pool });
@@ -496,7 +534,7 @@ test('handles failed product creates with the correct rollback and release seman
         error.cause === primaryError &&
         error.errors[0] === primaryError &&
         error.errors[1] === rollbackError &&
-        error.errors[2] === releaseError,
+        error.errors.length === 2,
     );
     assert.deepEqual(harness.events, [
       'getConnection',
@@ -504,9 +542,9 @@ test('handles failed product creates with the correct rollback and release seman
       'selectCategory',
       'insertProduct',
       'rollback',
-      'release',
+      'destroy',
     ]);
-    assert.equal(harness.releaseCount, 1);
+    assert.equal(harness.releaseCount, 0);
   });
 });
 
@@ -514,7 +552,7 @@ test('validates create defaults and partial updates without unsafe coercion', ()
   assert.deepEqual(
     validateNewProduct({ categoryId: 2, name: '  قهوه  ', price: '0' }),
     {
-      categoryId: 2,
+      categoryId: '2',
       name: 'قهوه',
       description: null,
       price: '0',
@@ -610,7 +648,25 @@ test('rejects invalid product names, descriptions, references, prices, ordering,
     { ...valid, categoryId: 0 },
     { ...valid, categoryId: -1 },
     { ...valid, categoryId: 1.5 },
-    { ...valid, categoryId: '2' },
+    { ...valid, categoryId: '' },
+    { ...valid, categoryId: '0' },
+    { ...valid, categoryId: '00' },
+    { ...valid, categoryId: '01' },
+    { ...valid, categoryId: '-1' },
+    { ...valid, categoryId: '+1' },
+    { ...valid, categoryId: '1.0' },
+    { ...valid, categoryId: '1e3' },
+    { ...valid, categoryId: ' 1' },
+    { ...valid, categoryId: '1 ' },
+    { ...valid, categoryId: 'abc' },
+    { ...valid, categoryId: '۱۲۳' },
+    { ...valid, categoryId: '18446744073709551616' },
+    { ...valid, categoryId: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, categoryId: Number.NaN },
+    { ...valid, categoryId: Number.POSITIVE_INFINITY },
+    { ...valid, categoryId: null },
+    { ...valid, categoryId: {} },
+    { ...valid, categoryId: [] },
     { ...valid, price: '-1' },
     { ...valid, price: '1.1' },
     { ...valid, price: '12abc' },
@@ -639,6 +695,19 @@ test('rejects invalid product names, descriptions, references, prices, ordering,
 
   for (const body of invalidBodies) {
     assert.throws(() => validateNewProduct(body), (error) => error.status === 400);
+  }
+
+  for (const categoryId of [
+    '1',
+    '9007199254740992',
+    '18446744073709551615',
+    1,
+    Number.MAX_SAFE_INTEGER,
+  ]) {
+    assert.equal(
+      validateNewProduct({ ...valid, categoryId }).categoryId,
+      String(categoryId),
+    );
   }
 
   for (const value of [
@@ -699,7 +768,7 @@ test('updates only allowlisted columns and reloads unchanged products safely', a
     update.sql,
     /SET category_id = \?, description = \?, price = \?, display_order = \?, is_available = \?, is_visible = \?/,
   );
-  assert.deepEqual(update.parameters, [3, '', '90000', 8, 0, 0, '1']);
+  assert.deepEqual(update.parameters, ['3', '', '90000', 8, 0, 0, '1']);
   assert.equal(updated.categoryId, '3');
   assert.equal(updated.description, '');
   assert.equal(updated.isAvailable, false);
@@ -850,5 +919,111 @@ test('deletes products using the driver result header and preserves unknown erro
     const service = createAdminProductsService({ executor: harness.executor });
 
     await assert.rejects(service.remove('7'), (error) => error === databaseError);
+  });
+});
+
+test('requires an image and cleans staged files after metadata validation failure', async () => {
+  const events = [];
+  const storage = {
+    async store() {
+      events.push('store');
+      return { publicPath: managedImagePath };
+    },
+    async remove(publicPath) {
+      events.push(`remove:${publicPath}`);
+      return true;
+    },
+  };
+  const service = createProductionAdminProductsService({
+    executor: {
+      async getConnection() {
+        events.push('database');
+        throw new Error('Database must not be reached.');
+      },
+    },
+    productImageStorage: storage,
+  });
+
+  await assert.rejects(
+    service.create({ categoryId: '1', name: '', price: '100' }, validImage),
+    (error) => error.code === 'INVALID_PRODUCT_NAME',
+  );
+  assert.deepEqual(events, ['store', `remove:${managedImagePath}`]);
+  await assert.rejects(
+    service.create({ categoryId: '1', name: 'قهوه', price: '100' }),
+    (error) => error.code === 'PRODUCT_IMAGE_REQUIRED',
+  );
+  assert.deepEqual(events, ['store', `remove:${managedImagePath}`]);
+});
+
+test('reconciles committed, not-committed, and unknown create acknowledgements', async (context) => {
+  const commitError = Object.assign(new Error('commit acknowledgement lost'), {
+    code: 'ECONNRESET',
+  });
+
+  await context.test('committed', async () => {
+    const harness = createTransactionHarness({
+      failures: {
+        commit: commitError,
+        commitVerificationRows: [productRow({ id: '9223372036854775808' })],
+      },
+    });
+    const removed = [];
+    const service = createProductionAdminProductsService({
+      executor: harness.pool,
+      productImageStorage: {
+        async store() { return { publicPath: managedImagePath }; },
+        async remove(path) { removed.push(path); return true; },
+      },
+      logger: { error() {} },
+    });
+
+    const result = await service.create(
+      { categoryId: '2', name: 'قهوه', price: '100' },
+      validImage,
+    );
+    assert.equal(result.id, '9223372036854775808');
+    assert.deepEqual(removed, []);
+  });
+
+  await context.test('not committed', async () => {
+    const harness = createTransactionHarness({ failures: { commit: commitError } });
+    const removed = [];
+    const service = createProductionAdminProductsService({
+      executor: harness.pool,
+      productImageStorage: {
+        async store() { return { publicPath: managedImagePath }; },
+        async remove(path) { removed.push(path); return true; },
+      },
+    });
+
+    await assert.rejects(
+      service.create({ categoryId: '2', name: 'قهوه', price: '100' }, validImage),
+      (error) => error === commitError,
+    );
+    assert.deepEqual(removed, [managedImagePath]);
+  });
+
+  await context.test('unknown', async () => {
+    const harness = createTransactionHarness({
+      failures: { commit: commitError, verification: new Error('verification unavailable') },
+    });
+    const removed = [];
+    const service = createProductionAdminProductsService({
+      executor: harness.pool,
+      productImageStorage: {
+        async store() { return { publicPath: managedImagePath }; },
+        async remove(path) { removed.push(path); return true; },
+      },
+    });
+
+    await assert.rejects(
+      service.create({ categoryId: '2', name: 'قهوه', price: '100' }, validImage),
+      (error) =>
+        error instanceof AggregateError &&
+        error.code === 'PRODUCT_CREATE_COMMIT_OUTCOME_UNKNOWN' &&
+        error.cause === commitError,
+    );
+    assert.deepEqual(removed, []);
   });
 });

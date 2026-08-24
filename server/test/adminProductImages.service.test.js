@@ -15,7 +15,7 @@ function productRow(overrides = {}) {
     name: 'Espresso',
     description: null,
     price: '125000',
-    imagePath: null,
+    imagePath: oldImagePath,
     sortOrder: 3,
     isAvailable: 1,
     isVisible: 1,
@@ -221,6 +221,7 @@ test('uploads an image atomically and preserves an unsigned BIGINT id as a strin
     'reloadProduct',
     'commit',
     'release',
+    `remove:${oldImagePath}`,
   ]);
   assert.match(lock.sql, /WHERE menuItems\.id = \?/);
   assert.match(lock.sql, /FOR UPDATE$/);
@@ -556,170 +557,16 @@ test('resolves a durable replace when each post-commit cleanup step fails alone'
   });
 });
 
-test('deletes an image transactionally and removes the old file only after commit', async () => {
-  const harness = createHarness({
-    lockedRows: [productRow({ imagePath: oldImagePath })],
-    reloadRows: [productRow({ imagePath: null })],
-  });
-  const product = await createService(harness).remove(maximumId);
-  const update = harness.queries.find((query) => query.sql.startsWith('UPDATE menu_items'));
+test('rejects independent image deletion without touching database or storage', async () => {
+  const harness = createHarness();
 
-  assert.equal(product.id, maximumId);
-  assert.equal(product.imagePath, null);
-  assert.equal(update.sql, 'UPDATE menu_items SET image_path = NULL WHERE id = ?');
-  assert.deepEqual(update.parameters, [maximumId]);
-  assert.deepEqual(harness.events, [
-    'getConnection',
-    'beginTransaction',
-    'lockProduct',
-    'updateProduct',
-    'reloadProduct',
-    'commit',
-    'release',
-    `remove:${oldImagePath}`,
-  ]);
-  assert.equal(harness.releaseCount, 1);
-});
-
-test('treats deleting an absent image as an idempotent success', async () => {
-  const harness = createHarness({ lockedRows: [productRow({ imagePath: null })] });
-  const product = await createService(harness).remove(maximumId);
-
-  assert.equal(product.id, maximumId);
-  assert.equal(product.imagePath, null);
-  assert.deepEqual(harness.events, [
-    'getConnection',
-    'beginTransaction',
-    'lockProduct',
-    'commit',
-    'release',
-  ]);
-});
-
-test('rolls back failed deletes without removing the old file', async (context) => {
-  for (const failureName of ['update', 'reload']) {
-    await context.test(failureName, async () => {
-      const primaryError = new Error(`${failureName} failed`);
-      const harness = createHarness({
-        lockedRows: [productRow({ imagePath: oldImagePath })],
-        reloadRows: [productRow({ imagePath: null })],
-        failures: { [failureName]: primaryError },
-      });
-
-      await assert.rejects(
-        createService(harness).remove(maximumId),
-        (error) => error === primaryError,
-      );
-      assert.equal(harness.events.includes('rollback'), true);
-      assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
-      assert.equal(harness.destroyCount, 0);
-      assert.equal(harness.releaseCount, 1);
-    });
-  }
-
-  await context.test('rollback failure destroys the connection', async () => {
-    const primaryError = new Error('update failed');
-    const rollbackError = new Error('rollback failed');
-    const harness = createHarness({
-      lockedRows: [productRow({ imagePath: oldImagePath })],
-      reloadRows: [productRow({ imagePath: null })],
-      failures: { update: primaryError, rollback: rollbackError },
-    });
-
-    await assert.rejects(
-      createService(harness).remove(maximumId),
-      (error) =>
-        error instanceof AggregateError &&
-        error.cause === primaryError &&
-        error.errors[0] === primaryError &&
-        error.errors[1] === rollbackError,
-    );
-    assert.deepEqual(
-      { destroy: harness.destroyCount, release: harness.releaseCount },
-      { destroy: 1, release: 0 },
-    );
-    assert.deepEqual(harness.events.slice(-3), [
-      'updateProduct',
-      'rollback',
-      'destroy',
-    ]);
-    assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
-  });
-
-  await context.test('ambiguous commit', async () => {
-    const commitError = Object.assign(new Error('commit acknowledgement lost'), {
-      code: 'ECONNRESET',
-    });
-    let durableImagePath = oldImagePath;
-    const harness = createHarness({
-      lockedRows: [productRow({ imagePath: oldImagePath })],
-      reloadRows: [productRow({ imagePath: null })],
-      failures: {
-        commit: commitError,
-        commitApplied() {
-          durableImagePath = null;
-        },
-      },
-    });
-
-    await assert.rejects(
-      createService(harness).remove(maximumId),
-      (error) =>
-        error instanceof AggregateError &&
-        error.code === 'PRODUCT_IMAGE_COMMIT_OUTCOME_UNKNOWN' &&
-        error.cause === commitError,
-    );
-    assert.equal(harness.events.includes('rollback'), false);
-    assert.equal(harness.events.includes('destroy'), true);
-    assert.equal(durableImagePath, null);
-    assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
-  });
-
-  await context.test('empty reload', async () => {
-    const harness = createHarness({
-      lockedRows: [productRow({ imagePath: oldImagePath })],
-      reloadRows: [],
-    });
-
-    await assert.rejects(
-      createService(harness).remove(maximumId),
-      /Product without image could not be loaded/,
-    );
-    assert.equal(harness.events.includes('commit'), false);
-    assert.equal(harness.events.includes(`remove:${oldImagePath}`), false);
-  });
-});
-
-test('returns 404 for a missing product and survives post-commit delete cleanup failure', async (context) => {
-  await context.test('missing product', async () => {
-    const harness = createHarness({ lockedRows: [] });
-
-    await assert.rejects(
-      createService(harness).remove(maximumId),
-      (error) => error.status === 404 && error.code === 'PRODUCT_NOT_FOUND',
-    );
-    assert.deepEqual(harness.events, [
-      'getConnection',
-      'beginTransaction',
-      'lockProduct',
-      'rollback',
-      'release',
-    ]);
-  });
-
-  await context.test('post-commit cleanup failure', async () => {
-    const cleanupError = Object.assign(new Error('private path'), { code: 'EACCES' });
-    const harness = createHarness({
-      lockedRows: [productRow({ imagePath: oldImagePath })],
-      reloadRows: [productRow({ imagePath: null })],
-      removeFailures: new Map([[oldImagePath, cleanupError]]),
-    });
-    const product = await createService(harness).remove(maximumId);
-
-    assert.equal(product.imagePath, null);
-    assert.equal(harness.events.includes('rollback'), false);
-    assert.equal(harness.releaseCount, 1);
-    assert.equal(harness.logs.length, 1);
-    assert.equal(JSON.stringify(harness.logs).includes('private path'), false);
-  });
+  await assert.rejects(
+    createService(harness).remove(maximumId),
+    (error) =>
+      error.status === 409 &&
+      error.code === 'PRODUCT_IMAGE_REQUIRED' &&
+      error.isSafeToDisplay === true,
+  );
+  assert.deepEqual(harness.events, []);
+  assert.deepEqual(harness.queries, []);
 });

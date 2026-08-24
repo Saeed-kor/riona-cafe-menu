@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { adminCategoriesApi } from '../api/adminCategories.js'
+import { ProductManager } from './ProductManager.jsx'
 
 const maximumCategoryNameCharacters = 100
 const maximumSortOrder = 4_294_967_295
@@ -662,10 +663,13 @@ function AdminDashboard({ admin }) {
             <span className="admin-dashboard__index" aria-hidden="true">
               ۰۲
             </span>
-            <span className="admin-dashboard__status">به‌زودی</span>
+            <span className="admin-dashboard__status admin-dashboard__status--ready">فعال</span>
           </div>
           <h2>مدیریت محصولات</h2>
-          <p>رابط مدیریت محصولات در مرحلهٔ بعد به پنل متصل می‌شود.</p>
+          <p>ایجاد، ویرایش، جایگزینی تصویر و حذف محصولات در دسترس است.</p>
+          <a className="admin-secondary-button admin-dashboard__link" href="/admin/products">
+            ورود به محصولات
+          </a>
         </article>
       </div>
     </section>
@@ -782,19 +786,30 @@ export function AdminPanel({
               </span>
               <span>دسته‌بندی‌ها</span>
             </a>
-            <span className="admin-nav-link admin-nav-link--disabled" aria-disabled="true">
+            <a
+              className={`admin-nav-link${pathname === '/admin/products' ? ' admin-nav-link--active' : ''}`}
+              href="/admin/products"
+              aria-current={pathname === '/admin/products' ? 'page' : undefined}
+            >
               <span className="admin-nav-link__index" aria-hidden="true">
                 ۰۳
               </span>
               <span>محصولات</span>
-              <small>به‌زودی</small>
-            </span>
+            </a>
           </nav>
         </aside>
         <div className="admin-panel__content">
           {pathname === '/admin' ? <AdminDashboard admin={admin} /> : null}
           {pathname === '/admin/categories' ? (
             <CategoryManager
+              getSessionEpoch={getSessionEpoch}
+              isSessionEpochCurrent={isSessionEpochCurrent}
+              onAuthenticationRequired={onAuthenticationRequired}
+              suspended={isLoggingOut}
+            />
+          ) : null}
+          {pathname === '/admin/products' ? (
+            <ProductManager
               getSessionEpoch={getSessionEpoch}
               isSessionEpochCurrent={isSessionEpochCurrent}
               onAuthenticationRequired={onAuthenticationRequired}

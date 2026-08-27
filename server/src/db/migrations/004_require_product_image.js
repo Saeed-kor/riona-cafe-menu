@@ -13,6 +13,13 @@ function normalizeExtra(value) {
     : String(value).trim().toLowerCase();
 }
 
+function hasNoColumnDefault(value) {
+  return (
+    value === null ||
+    (typeof value === 'string' && value.trim().toLowerCase() === 'null')
+  );
+}
+
 function hasExpectedImageColumn(column, { nullable }) {
   return (
     column?.columnName === 'image_path' &&
@@ -23,7 +30,7 @@ function hasExpectedImageColumn(column, { nullable }) {
     column.characterSet?.toLowerCase() === 'utf8mb4' &&
     column.collation?.toLowerCase() === 'utf8mb4_unicode_ci' &&
     column.isNullable === (nullable ? 'YES' : 'NO') &&
-    column.defaultValue === null &&
+    hasNoColumnDefault(column.defaultValue) &&
     normalizeExtra(column.extra) === ''
   );
 }

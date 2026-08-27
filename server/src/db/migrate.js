@@ -16,7 +16,7 @@ function createSafeError(message, code) {
   return error;
 }
 
-async function loadMigrations() {
+export async function loadMigrations() {
   const entries = await readdir(migrationDirectory, { withFileTypes: true });
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
@@ -159,6 +159,43 @@ export async function ensureMigrationTable(connection, databaseName = env.DB_NAM
   validateMigrationTableMetadata(table, columns, indexes);
 }
 
+export async function runDiscoveredMigrations(
+  connection,
+  migrations,
+  { databaseName = env.DB_NAME, onMigrationSelected = () => {} } = {},
+) {
+  await ensureMigrationTable(connection, databaseName);
+
+  const [appliedRows] = await connection.query(
+    'SELECT id FROM schema_migrations ORDER BY id',
+  );
+  const appliedIds = new Set(appliedRows.map((row) => row.id));
+  const availableIds = new Set(migrations.map((migration) => migration.id));
+
+  if (appliedRows.some((row) => !availableIds.has(row.id))) {
+    throw createSafeError(
+      'The database migration history is incompatible with this codebase.',
+      'UNKNOWN_APPLIED_MIGRATION',
+    );
+  }
+
+  for (const migration of migrations) {
+    onMigrationSelected(migration.id);
+
+    if (appliedIds.has(migration.id)) {
+      console.log(`Skipping already applied migration: ${migration.id}`);
+      continue;
+    }
+
+    console.log(`Applying migration: ${migration.id}`);
+    await migration.up(connection, { databaseName });
+    await connection.execute('INSERT INTO schema_migrations (id) VALUES (?)', [migration.id]);
+    console.log(`Applied migration: ${migration.id}`);
+  }
+
+  console.log('Database migrations are up to date.');
+}
+
 export async function runMigrations() {
   let connection = null;
   let lockAcquired = false;
@@ -169,36 +206,12 @@ export async function runMigrations() {
     connection = await pool.getConnection();
     await acquireMigrationLock(connection);
     lockAcquired = true;
-    await ensureMigrationTable(connection, env.DB_NAME);
-
-    const [appliedRows] = await connection.query(
-      'SELECT id FROM schema_migrations ORDER BY id',
-    );
-    const appliedIds = new Set(appliedRows.map((row) => row.id));
-    const availableIds = new Set(migrations.map((migration) => migration.id));
-
-    if (appliedRows.some((row) => !availableIds.has(row.id))) {
-      throw createSafeError(
-        'The database migration history is incompatible with this codebase.',
-        'UNKNOWN_APPLIED_MIGRATION',
-      );
-    }
-
-    for (const migration of migrations) {
-      activeMigrationId = migration.id;
-
-      if (appliedIds.has(migration.id)) {
-        console.log(`Skipping already applied migration: ${migration.id}`);
-        continue;
-      }
-
-      console.log(`Applying migration: ${migration.id}`);
-      await migration.up(connection, { databaseName: env.DB_NAME });
-      await connection.execute('INSERT INTO schema_migrations (id) VALUES (?)', [migration.id]);
-      console.log(`Applied migration: ${migration.id}`);
-    }
-
-    console.log('Database migrations are up to date.');
+    await runDiscoveredMigrations(connection, migrations, {
+      databaseName: env.DB_NAME,
+      onMigrationSelected(migrationId) {
+        activeMigrationId = migrationId;
+      },
+    });
   } catch (error) {
     if (error?.isSafeToDisplay) {
       console.error(error.message);

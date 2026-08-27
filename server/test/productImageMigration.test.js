@@ -24,7 +24,11 @@ function imageColumn(isNullable = 'YES', overrides = {}) {
   };
 }
 
-function createMigrationConnection({ nullable = true, nullRows = [] } = {}) {
+function createMigrationConnection({
+  nullable = true,
+  nullRows = [],
+  defaultValue = null,
+} = {}) {
   const calls = [];
   let currentNullable = nullable;
 
@@ -35,7 +39,7 @@ function createMigrationConnection({ nullable = true, nullRows = [] } = {}) {
         calls.push({ method: 'execute', sql, parameters });
 
         if (sql.includes('INFORMATION_SCHEMA.COLUMNS')) {
-          return [[imageColumn(currentNullable ? 'YES' : 'NO')], []];
+          return [[imageColumn(currentNullable ? 'YES' : 'NO', { defaultValue })], []];
         }
 
         if (sql.includes('WHERE image_path IS NULL')) {
@@ -57,6 +61,39 @@ function createMigrationConnection({ nullable = true, nullRows = [] } = {}) {
   };
 }
 
+function createMetadataConnection(columns) {
+  const calls = [];
+
+  return {
+    calls,
+    connection: {
+      async execute(sql, parameters) {
+        calls.push({ method: 'execute', sql, parameters });
+        assert.match(sql, /INFORMATION_SCHEMA\.COLUMNS/);
+        return [columns, []];
+      },
+      async query(sql) {
+        calls.push({ method: 'query', sql });
+        throw new Error(`Unexpected migration DDL: ${sql}`);
+      },
+    },
+  };
+}
+
+async function assertIncompatibleBeforeDdl(columns) {
+  const harness = createMetadataConnection(columns);
+
+  await assert.rejects(
+    up(harness.connection, { databaseName: 'disposable_test_database' }),
+    (error) =>
+      error.code === 'PRODUCT_IMAGE_SCHEMA_INCOMPATIBLE' &&
+      error.isSafeToDisplay === true,
+  );
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].method, 'execute');
+  assert.match(harness.calls[0].sql, /INFORMATION_SCHEMA\.COLUMNS/);
+}
+
 test('registers migration 004 after the immutable 001-003 sequence', async () => {
   const entries = (await readdir(new URL('../src/db/migrations/', import.meta.url)))
     .filter((name) => name.endsWith('.js'))
@@ -71,8 +108,72 @@ test('registers migration 004 after the immutable 001-003 sequence', async () =>
   assert.equal(id, '004_require_product_image');
 });
 
-test('preflights null products before making only image_path NOT NULL', async () => {
-  const harness = createMigrationConnection();
+test('accepts only the MySQL and normalized unquoted MariaDB no-default representations', async (context) => {
+  const acceptedDefaults = [
+    ['MySQL null', null],
+    ['MariaDB uppercase NULL', 'NULL'],
+    ['MariaDB lowercase null', 'null'],
+    ['MariaDB case and surrounding whitespace', ' \tNuLl\r\n'],
+  ];
+
+  for (const [name, defaultValue] of acceptedDefaults) {
+    await context.test(name, async () => {
+      const harness = createMetadataConnection([
+        imageColumn('NO', { defaultValue }),
+      ]);
+
+      const schema = await validateRequiredProductImageSchema(
+        harness.connection,
+        'disposable_test_database',
+      );
+
+      assert.deepEqual(schema, { nullable: false });
+      assert.equal(Object.isFrozen(schema), true);
+      assert.equal(harness.calls.length, 1);
+    });
+  }
+});
+
+test('accepts real MariaDB NULL metadata even though the previous strict-null condition rejects it', async () => {
+  const mariaDbColumn = imageColumn('NO', { defaultValue: 'NULL' });
+  const harness = createMetadataConnection([mariaDbColumn]);
+
+  assert.equal(mariaDbColumn.defaultValue === null, false);
+  await assert.doesNotReject(
+    validateRequiredProductImageSchema(
+      harness.connection,
+      'disposable_test_database',
+    ),
+  );
+});
+
+test('rejects every non-null or non-canonical COLUMN_DEFAULT representation', async (context) => {
+  const rejectedDefaults = [
+    ['undefined', undefined],
+    ['empty string', ''],
+    ['whitespace-only string', ' \t\r\n'],
+    ['single-quoted NULL literal', "'NULL'"],
+    ['double-quoted NULL literal', '"NULL"'],
+    ['other literal string', 'none'],
+    ['CURRENT_TIMESTAMP', 'CURRENT_TIMESTAMP'],
+    ['SQL expression', 'COALESCE(NULL, \'image.png\')'],
+    ['number', 0],
+    ['Boolean', false],
+    ['object', { value: 'NULL' }],
+    ['array', ['NULL']],
+  ];
+
+  for (const [name, defaultValue] of rejectedDefaults) {
+    await context.test(name, async () => {
+      await assertIncompatibleBeforeDdl([
+        imageColumn('YES', { defaultValue }),
+      ]);
+    });
+  }
+});
+
+test('preflights a MariaDB-compatible nullable schema before making only image_path NOT NULL', async () => {
+  const harness = createMigrationConnection({ defaultValue: 'NULL' });
 
   await up(harness.connection, { databaseName: 'disposable_test_database' });
 
@@ -82,6 +183,10 @@ test('preflights null products before making only image_path NOT NULL', async ()
   );
   assert.match(harness.calls[1].sql, /image_path IS NULL/);
   assert.deepEqual(harness.calls[0].parameters, ['disposable_test_database']);
+  assert.equal(
+    harness.calls.filter((call) => call.sql.includes('INFORMATION_SCHEMA.COLUMNS')).length,
+    2,
+  );
   await validateRequiredProductImageSchema(
     harness.connection,
     'disposable_test_database',
@@ -110,21 +215,37 @@ test('is idempotent when image_path is already required', async () => {
   assert.equal(harness.calls[0].sql.includes('INFORMATION_SCHEMA.COLUMNS'), true);
 });
 
-test('rejects drifted image columns without issuing DDL', async () => {
-  const calls = [];
-  const connection = {
-    async execute(sql) {
-      calls.push({ method: 'execute', sql });
-      return [[imageColumn('YES', { maximumLength: 255, columnType: 'varchar(255)' })], []];
-    },
-    async query(sql) {
-      calls.push({ method: 'query', sql });
-    },
-  };
+test('rejects every protected image-column schema drift before issuing DDL', async (context) => {
+  const driftedColumns = [
+    ['missing metadata row', []],
+    ['incomplete metadata row', [{}]],
+    ['duplicate metadata rows', [imageColumn(), imageColumn()]],
+    ['column name', [imageColumn('YES', { columnName: 'legacy_image_path' })]],
+    ['ordinal position', [imageColumn('YES', { ordinalPosition: 7 })]],
+    ['data type', [imageColumn('YES', { dataType: 'text' })]],
+    ['column type', [imageColumn('YES', { columnType: 'varchar(255)' })]],
+    ['maximum length', [imageColumn('YES', { maximumLength: 255 })]],
+    ['character set', [imageColumn('YES', { characterSet: 'latin1' })]],
+    ['collation', [imageColumn('YES', { collation: 'utf8mb4_bin' })]],
+    ['nullability metadata', [imageColumn('MAYBE')]],
+    ['extra metadata', [imageColumn('YES', { extra: 'DEFAULT_GENERATED' })]],
+  ];
+
+  for (const [name, columns] of driftedColumns) {
+    await context.test(name, async () => {
+      await assertIncompatibleBeforeDdl(columns);
+    });
+  }
+});
+
+test('required-schema validation still rejects a nullable image column', async () => {
+  const harness = createMetadataConnection([imageColumn('YES')]);
 
   await assert.rejects(
-    up(connection, { databaseName: 'disposable_test_database' }),
+    validateRequiredProductImageSchema(
+      harness.connection,
+      'disposable_test_database',
+    ),
     (error) => error.code === 'PRODUCT_IMAGE_SCHEMA_INCOMPATIBLE',
   );
-  assert.equal(calls.some((call) => call.method === 'query'), false);
 });

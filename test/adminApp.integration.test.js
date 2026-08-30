@@ -36,10 +36,23 @@ installGlobal('Event', dom.window.Event)
 installGlobal('MouseEvent', dom.window.MouseEvent)
 installGlobal('Node', dom.window.Node)
 installGlobal('MutationObserver', dom.window.MutationObserver)
+installGlobal('File', dom.window.File)
+installGlobal('Blob', dom.window.Blob)
+installGlobal('FormData', dom.window.FormData)
 installGlobal('getComputedStyle', dom.window.getComputedStyle.bind(dom.window))
 installGlobal('IS_REACT_ACT_ENVIRONMENT', true)
 
 const originalFetch = globalThis.fetch
+const originalCreateObjectUrl = URL.createObjectURL
+const originalRevokeObjectUrl = URL.revokeObjectURL
+const categoryObjectUrls = []
+const revokedCategoryObjectUrls = []
+URL.createObjectURL = () => {
+  const objectUrl = `blob:riona-category-${categoryObjectUrls.length + 1}`
+  categoryObjectUrls.push(objectUrl)
+  return objectUrl
+}
+URL.revokeObjectURL = (objectUrl) => revokedCategoryObjectUrls.push(objectUrl)
 let fetchHandler = null
 
 globalThis.fetch = (...argumentsList) => fetchHandler(...argumentsList)
@@ -122,6 +135,15 @@ async function setInputValue(input, value) {
     valueSetter.call(input, value)
     input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
   })
+}
+
+async function setFileInput(input, file) {
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: file ? [file] : [],
+  })
+
+  await act(() => input.dispatchEvent(new dom.window.Event('change', { bubbles: true })))
 }
 
 async function travelHistory(direction) {
@@ -222,6 +244,8 @@ test.after(async () => {
   await unmountApp()
   await viteServer.close()
   globalThis.fetch = originalFetch
+  URL.createObjectURL = originalCreateObjectUrl
+  URL.revokeObjectURL = originalRevokeObjectUrl
   dom.window.close()
   await rm(viteCacheDirectory, { recursive: true, force: true })
 
@@ -267,6 +291,28 @@ test('keeps admin help contrast and Vazirmatn weights production-safe', async ()
       `${context} help contrast must be at least 4.5:1; received ${ratio}`,
     )
   }
+
+  const requiredBoundaryColor = adminCss.match(
+    /--admin-control-border-hover:\s*(#[0-9a-f]{6})\s*;/i,
+  )
+  assert.notEqual(requiredBoundaryColor, null)
+  assert.ok(contrastRatio(requiredBoundaryColor[1], '#ffffff') >= 3)
+  assert.equal(
+    readCssDeclaration(adminCss, '.admin-panel .category-image-preview', 'border'),
+    '1px solid var(--admin-control-border-hover)',
+  )
+  assert.equal(
+    readCssDeclaration(adminCss, '.admin-panel .category-item__media', 'border'),
+    '1px solid var(--admin-control-border-hover)',
+  )
+  assert.equal(
+    readCssDeclaration(
+      adminCss,
+      '.admin-panel .category-form__image-actions :where(.admin-secondary-button, .admin-danger-button)',
+      'min-height',
+    ),
+    '44px',
+  )
 
   const vazirmatnImports = [...adminCss.matchAll(
     /^@import\s+['"]@fontsource\/vazirmatn\/(\d+)\.css['"];/gm,
@@ -1105,6 +1151,13 @@ test('renders the Persian RTL admin shell with category loading and empty states
   assert.match(container.textContent, /هنوز دسته‌بندی‌ای ایجاد نشده است/)
   assert.equal(container.querySelector('.admin-inline-state--empty')?.getAttribute('role'), 'status')
   assert.equal(container.querySelector('#create-category-name').disabled, false)
+  const imageInput = container.querySelector('#create-category-image')
+  assert.equal(imageInput?.type, 'file')
+  assert.equal(imageInput?.accept, 'image/jpeg,image/png,image/webp')
+  assert.equal(
+    container.querySelector('label[for="create-category-image"]')?.textContent.includes('انتخاب تصویر'),
+    true,
+  )
 })
 
 test('redirects to login when the category API reports an expired session', async () => {
@@ -1129,7 +1182,7 @@ test('manages category create, edit, visibility, order, and confirmed deletion t
       {
         id: '2',
         name: 'دسر',
-        imagePath: '/uploads/categories/dessert.webp',
+        imagePath: '/uploads/categories/11111111111111111111111111111111.webp',
         sortOrder: 2,
         isVisible: true,
         createdAt: fixedDate,
@@ -1188,7 +1241,10 @@ test('manages category create, edit, visibility, order, and confirmed deletion t
     ['قهوه', 'دسر'],
   )
   const dessertImage = container.querySelector('[data-category-id="2"] img')
-  assert.equal(dessertImage?.getAttribute('src'), '/uploads/categories/dessert.webp')
+  assert.equal(
+    dessertImage?.getAttribute('src'),
+    '/uploads/categories/11111111111111111111111111111111.webp',
+  )
   assert.equal(container.querySelector('[data-category-id="1"] img'), null)
 
   await act(() => dessertImage.dispatchEvent(new dom.window.Event('error')))
@@ -1216,12 +1272,20 @@ test('manages category create, edit, visibility, order, and confirmed deletion t
     sortOrder: 1,
     isVisible: true,
   })
+  assert.equal(requests.some((request) => request.path.endsWith('/image')), false)
   assert.deepEqual(
     [...container.querySelectorAll('.category-item h3')].map((heading) => heading.textContent),
     ['قهوه', 'نوشیدنی سرد', 'دسر'],
   )
 
   const createdItem = container.querySelector('[data-category-id="3"]')
+  assert.equal(
+    createdItem
+      .querySelector('button[aria-expanded]')
+      .classList.contains('category-visibility-button'),
+    false,
+  )
+  assert.equal(createdItem.querySelectorAll('.category-visibility-button').length, 1)
   const editButton = [...createdItem.querySelectorAll('button')].find(
     (button) => button.textContent === 'ویرایش',
   )
@@ -1276,6 +1340,606 @@ test('manages category create, edit, visibility, order, and confirmed deletion t
   assert.match(confirmationMessage, /نوشیدنی خنک/)
   assert.equal(container.querySelector('[data-category-id="3"]'), null)
   assert.equal(requests.some((request) => request.options.method === 'DELETE'), true)
+})
+
+test('creates a category before uploading its image and updates the thumbnail without reload', async () => {
+  const createResponse = createControlledResponse()
+  const requestSequence = []
+  const objectUrlStart = categoryObjectUrls.length
+  const createdCategory = {
+    id: '42',
+    name: 'نوشیدنی گرم',
+    imagePath: null,
+    sortOrder: 3,
+    isVisible: true,
+  }
+  const uploadedCategory = {
+    ...createdCategory,
+    imagePath: '/uploads/categories/22222222222222222222222222222222.webp',
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [] })
+    }
+
+    if (path === '/api/admin/categories' && options.method === 'POST') {
+      requestSequence.push({ method: 'POST', path, body: JSON.parse(options.body) })
+      return createResponse.response
+    }
+
+    if (path === '/api/admin/categories/42/image' && options.method === 'PUT') {
+      requestSequence.push({ method: 'PUT', path, body: options.body })
+      assert.equal(options.body instanceof FormData, true)
+      assert.equal(new Headers(options.headers).has('content-type'), false)
+      assert.deepEqual([...options.body.keys()], ['image'])
+      assert.equal(options.body.getAll('image').length, 1)
+      return jsonResponse({ success: true, category: uploadedCategory })
+    }
+
+    throw new Error('Unexpected category image create request: ' + options.method + ' ' + path)
+  })
+  const image = new File(['category image'], 'hot-drink.webp', { type: 'image/webp' })
+
+  await setInputValue(container.querySelector('#create-category-name'), ' نوشیدنی گرم ')
+  await setInputValue(container.querySelector('#create-category-order'), '3')
+  await setFileInput(container.querySelector('#create-category-image'), image)
+  await settle()
+
+  const previewUrl = categoryObjectUrls[objectUrlStart]
+  const createForm = container.querySelector('#create-category-name').closest('form')
+  await act(() => {
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    createForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+  await settle()
+
+  assert.deepEqual(requestSequence, [
+    {
+      method: 'POST',
+      path: '/api/admin/categories',
+      body: { name: 'نوشیدنی گرم', sortOrder: 3, isVisible: true },
+    },
+  ])
+  assert.equal(container.querySelector('[data-category-id="42"]'), null)
+
+  createResponse.resolveResponse(jsonResponse({ success: true, category: createdCategory }, 201))
+  await settle()
+
+  assert.equal(requestSequence.length, 2)
+  assert.equal(requestSequence[1].method, 'PUT')
+  assert.equal(requestSequence[1].path, '/api/admin/categories/42/image')
+  assert.equal(requestSequence.filter((request) => request.method === 'POST').length, 1)
+  assert.equal(container.querySelectorAll('[data-category-id="42"]').length, 1)
+  assert.equal(
+    container.querySelector('[data-category-id="42"] .category-item__media img')?.getAttribute('src'),
+    uploadedCategory.imagePath,
+  )
+  assert.equal(container.querySelector('#create-category-name').value, '')
+  assert.equal(container.querySelector('#create-category-image').files.length, 0)
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === previewUrl).length,
+    1,
+  )
+  assert.match(container.textContent, /دسته‌بندی و تصویر آن با موفقیت ایجاد شد/)
+})
+
+test('does not mutate category state when an update returns a malformed 200 response', async () => {
+  const initialCategory = {
+    id: '45',
+    name: 'Original category',
+    imagePath: null,
+    sortOrder: 5,
+    isVisible: true,
+  }
+  let updateRequests = 0
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [initialCategory] })
+    }
+
+    if (path === '/api/admin/categories/45' && options.method === 'PATCH') {
+      updateRequests += 1
+      return jsonResponse({ success: true, category: { id: '45' } })
+    }
+
+    throw new Error('Unexpected malformed category response request: ' + options.method + ' ' + path)
+  })
+  const editButton = [...container.querySelectorAll('[data-category-id="45"] button')].find(
+    (button) => button.textContent === 'ویرایش',
+  )
+
+  await act(() => editButton.click())
+  await setInputValue(container.querySelector('#edit-category-45-name'), 'Changed locally')
+  await act(() =>
+    container
+      .querySelector('#edit-category-45-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.equal(updateRequests, 1)
+  assert.equal(
+    container.querySelector('[data-category-id="45"] .category-item__summary h3')?.textContent,
+    initialCategory.name,
+  )
+  assert.notEqual(container.querySelector('#edit-category-45-name'), null)
+  assert.match(container.querySelector('.admin-notice--error')?.textContent ?? '', /دوباره تلاش کنید/)
+  assert.equal(container.textContent.includes('password_hash'), false)
+})
+
+test('keeps a partial category create and retries its preserved image with PUT only', async () => {
+  const privateDetail = 'private storage implementation detail'
+  const requestSequence = []
+  const objectUrlStart = categoryObjectUrls.length
+  let uploadAttempts = 0
+  let storedCategory = {
+    id: '43',
+    name: 'چای ویژه',
+    imagePath: null,
+    sortOrder: 2,
+    isVisible: true,
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [] })
+    }
+
+    if (path === '/api/admin/categories' && options.method === 'POST') {
+      requestSequence.push({ method: 'POST', path })
+      return jsonResponse({ success: true, category: storedCategory }, 201)
+    }
+
+    if (path === '/api/admin/categories/43' && options.method === 'PATCH') {
+      requestSequence.push({ method: 'PATCH', path })
+      storedCategory = { ...storedCategory, ...JSON.parse(options.body) }
+      return jsonResponse({ success: true, category: storedCategory })
+    }
+
+    if (path === '/api/admin/categories/43/image' && options.method === 'PUT') {
+      uploadAttempts += 1
+      requestSequence.push({ method: 'PUT', path })
+
+      if (uploadAttempts <= 2) {
+        return jsonResponse({ success: false, message: privateDetail }, 500)
+      }
+
+      storedCategory = {
+        ...storedCategory,
+        imagePath: '/uploads/categories/33333333333333333333333333333333.webp',
+      }
+      return jsonResponse({ success: true, category: storedCategory })
+    }
+
+    throw new Error('Unexpected partial category request: ' + options.method + ' ' + path)
+  })
+  const image = new File(['retryable image'], 'special-tea.png', { type: 'image/png' })
+
+  await setInputValue(container.querySelector('#create-category-name'), 'چای ویژه')
+  await setInputValue(container.querySelector('#create-category-order'), '2')
+  await setFileInput(container.querySelector('#create-category-image'), image)
+  await settle()
+  const createPreviewUrl = categoryObjectUrls[objectUrlStart]
+
+  await act(() =>
+    container
+      .querySelector('#create-category-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.deepEqual(
+    requestSequence.map((request) => request.method),
+    ['POST', 'PUT'],
+  )
+  assert.equal(container.querySelectorAll('[data-category-id="43"]').length, 1)
+  assert.equal(container.querySelector('#create-category-name').value, '')
+  assert.equal(container.querySelector('#create-category-image').files.length, 0)
+  const partialNotice = container.querySelector('.admin-notice--warning')
+  assert.equal(partialNotice?.getAttribute('role'), 'status')
+  assert.match(partialNotice?.textContent ?? '', /دسته‌بندی ایجاد شد، اما/)
+  assert.match(partialNotice?.textContent ?? '', /برای تلاش دوباره حفظ شده است/)
+  assert.equal(partialNotice?.textContent.includes(privateDetail), false)
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === createPreviewUrl).length,
+    1,
+  )
+
+  await settle()
+  const retryPreviewUrl = categoryObjectUrls[objectUrlStart + 1]
+  assert.notEqual(retryPreviewUrl, createPreviewUrl)
+  assert.equal(container.querySelector('#edit-category-43-image')?.files.length, 0)
+  assert.match(
+    container.querySelector('#category-editor-43')?.textContent ?? '',
+    /special-tea\.png/,
+  )
+  assert.equal(
+    container.querySelector('#category-editor-43 .category-image-preview img')?.src,
+    retryPreviewUrl,
+  )
+
+  const retryForm = container.querySelector('#edit-category-43-name').closest('form')
+  await act(() => {
+    retryForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    retryForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+  await settle()
+
+  assert.deepEqual(
+    requestSequence.map((request) => request.method),
+    ['POST', 'PUT', 'PUT'],
+  )
+  assert.equal(requestSequence.filter((request) => request.method === 'POST').length, 1)
+  assert.equal(requestSequence.filter((request) => request.method === 'PATCH').length, 0)
+  assert.equal(uploadAttempts, 2)
+  assert.equal(container.querySelectorAll('[data-category-id="43"]').length, 1)
+  assert.notEqual(container.querySelector('#edit-category-43-name'), null)
+  assert.equal(
+    container.querySelector('#category-editor-43 .category-image-preview img')?.src,
+    retryPreviewUrl,
+  )
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === retryPreviewUrl).length,
+    0,
+  )
+  const secondFailureNotice = container.querySelector('.admin-notice--warning')
+  assert.match(secondFailureNotice?.textContent ?? '', /برای تلاش دوباره حفظ شده است/)
+  assert.equal(secondFailureNotice?.textContent.includes(privateDetail), false)
+
+  await act(() => {
+    retryForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+    retryForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+  await settle()
+
+  assert.deepEqual(
+    requestSequence.map((request) => request.method),
+    ['POST', 'PUT', 'PUT', 'PUT'],
+  )
+  assert.equal(requestSequence.filter((request) => request.method === 'POST').length, 1)
+  assert.equal(requestSequence.filter((request) => request.method === 'PATCH').length, 0)
+  assert.equal(uploadAttempts, 3)
+  assert.equal(container.querySelector('#edit-category-43-name'), null)
+  assert.equal(
+    container.querySelector('[data-category-id="43"] .category-item__media img')?.getAttribute('src'),
+    storedCategory.imagePath,
+  )
+  assert.match(
+    container.querySelector('.admin-notice--success')?.textContent ?? '',
+    /به‌روزرسانی شد/,
+  )
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === retryPreviewUrl).length,
+    1,
+  )
+})
+
+test('replaces, cancels, and deletes category images with complete object URL cleanup', async () => {
+  const requestSequence = []
+  const objectUrlStart = categoryObjectUrls.length
+  const privateUploadDetail = 'private category upload failure'
+  let replacementUploadAttempts = 0
+  let storedCategory = {
+    id: '44',
+    name: 'دسر',
+    imagePath: '/uploads/categories/44444444444444444444444444444444.webp',
+    sortOrder: 4,
+    isVisible: true,
+  }
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [storedCategory] })
+    }
+
+    if (path === '/api/admin/categories/44' && options.method === 'PATCH') {
+      requestSequence.push({ method: 'PATCH', path })
+      storedCategory = { ...storedCategory, ...JSON.parse(options.body) }
+      return jsonResponse({ success: true, category: storedCategory })
+    }
+
+    if (path === '/api/admin/categories/44/image' && options.method === 'PUT') {
+      requestSequence.push({ method: 'PUT', path })
+      replacementUploadAttempts += 1
+      assert.equal(options.body.get('image'), replacementImage)
+
+      if (replacementUploadAttempts === 1) {
+        return jsonResponse({ success: false, message: privateUploadDetail }, 500)
+      }
+
+      storedCategory = {
+        ...storedCategory,
+        imagePath: '/uploads/categories/55555555555555555555555555555555.webp',
+      }
+      return jsonResponse({ success: true, category: storedCategory })
+    }
+
+    if (path === '/api/admin/categories/44/image' && options.method === 'DELETE') {
+      requestSequence.push({ method: 'DELETE', path })
+      storedCategory = { ...storedCategory, imagePath: null }
+      return jsonResponse({ success: true, category: storedCategory })
+    }
+
+    throw new Error('Unexpected category edit image request: ' + options.method + ' ' + path)
+  })
+  const firstImage = new File(['first image'], 'dessert-first.png', { type: 'image/png' })
+  const replacementImage = new File(['replacement image'], 'dessert-replacement.png', {
+    type: 'image/png',
+  })
+
+  function findCategoryButton(label) {
+    return [...container.querySelectorAll('[data-category-id="44"] button')].find(
+      (button) => button.textContent === label,
+    )
+  }
+
+  await act(() =>
+    findCategoryButton('ویرایش').dispatchEvent(
+      new dom.window.MouseEvent('click', { bubbles: true }),
+    ),
+  )
+  assert.equal(
+    container
+      .querySelector('#category-editor-44 .category-image-preview img')
+      ?.getAttribute('src'),
+    '/uploads/categories/44444444444444444444444444444444.webp',
+  )
+
+  const editImageInput = container.querySelector('#edit-category-44-image')
+  await setInputValue(container.querySelector('#edit-category-44-name'), 'دسر و شیرینی')
+  await setInputValue(container.querySelector('#edit-category-44-order'), '9')
+  await act(() => container.querySelector('#edit-category-44-visible').click())
+  assert.equal(container.querySelector('#edit-category-44-visible').checked, false)
+  await setFileInput(editImageInput, firstImage)
+  await settle()
+  const firstPreviewUrl = categoryObjectUrls[objectUrlStart]
+  await setFileInput(editImageInput, replacementImage)
+  await settle()
+  const replacementPreviewUrl = categoryObjectUrls[objectUrlStart + 1]
+
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === firstPreviewUrl).length,
+    1,
+  )
+  assert.equal(
+    container.querySelector('#category-editor-44 .category-image-preview img')?.src,
+    replacementPreviewUrl,
+  )
+
+  await act(() =>
+    findCategoryButton('انصراف').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+
+  assert.equal(requestSequence.length, 0)
+  assert.equal(container.querySelector('#category-editor-44'), null)
+  assert.equal(dom.window.document.activeElement, findCategoryButton('ویرایش'))
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === replacementPreviewUrl).length,
+    1,
+  )
+  assert.equal(
+    container.querySelector('[data-category-id="44"] .category-item__media img')?.getAttribute('src'),
+    '/uploads/categories/44444444444444444444444444444444.webp',
+  )
+
+  await act(() =>
+    findCategoryButton('ویرایش').dispatchEvent(
+      new dom.window.MouseEvent('click', { bubbles: true }),
+    ),
+  )
+  assert.equal(container.querySelector('#edit-category-44-name').value, 'دسر')
+  assert.equal(container.querySelector('#edit-category-44-order').value, '4')
+  assert.equal(container.querySelector('#edit-category-44-visible').checked, true)
+  await setFileInput(container.querySelector('#edit-category-44-image'), replacementImage)
+  await settle()
+  const repeatedPreviewUrl = categoryObjectUrls[objectUrlStart + 2]
+  assert.notEqual(repeatedPreviewUrl, replacementPreviewUrl)
+
+  await act(() =>
+    container
+      .querySelector('#edit-category-44-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.deepEqual(requestSequence, [
+    { method: 'PATCH', path: '/api/admin/categories/44' },
+    { method: 'PUT', path: '/api/admin/categories/44/image' },
+  ])
+  assert.notEqual(container.querySelector('#category-editor-44'), null)
+  assert.equal(
+    container.querySelector('#category-editor-44 .category-image-preview img')?.src,
+    repeatedPreviewUrl,
+  )
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === repeatedPreviewUrl).length,
+    0,
+  )
+  const retryNotice = container.querySelector('.admin-notice--warning')
+  assert.match(retryNotice?.textContent ?? '', /اطلاعات دسته‌بندی ذخیره شد، اما/)
+  assert.match(retryNotice?.textContent ?? '', /برای تلاش دوباره حفظ شده است/)
+  assert.equal(retryNotice?.textContent.includes(privateUploadDetail), false)
+
+  await act(() =>
+    container
+      .querySelector('#edit-category-44-name')
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.deepEqual(requestSequence, [
+    { method: 'PATCH', path: '/api/admin/categories/44' },
+    { method: 'PUT', path: '/api/admin/categories/44/image' },
+    { method: 'PUT', path: '/api/admin/categories/44/image' },
+  ])
+  assert.equal(container.querySelector('#category-editor-44'), null)
+  assert.equal(dom.window.document.activeElement, findCategoryButton('ویرایش'))
+  assert.equal(
+    container.querySelector('[data-category-id="44"] .category-item__media img')?.getAttribute('src'),
+    '/uploads/categories/55555555555555555555555555555555.webp',
+  )
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === repeatedPreviewUrl).length,
+    1,
+  )
+
+  await act(() =>
+    findCategoryButton('ویرایش').dispatchEvent(
+      new dom.window.MouseEvent('click', { bubbles: true }),
+    ),
+  )
+  const originalConfirm = dom.window.confirm
+  let confirmationMessage = ''
+  dom.window.confirm = (message) => {
+    confirmationMessage = message
+    return true
+  }
+
+  try {
+    await act(() =>
+      findCategoryButton('حذف تصویر فعلی').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }),
+      ),
+    )
+    await settle()
+  } finally {
+    dom.window.confirm = originalConfirm
+  }
+
+  assert.match(confirmationMessage, /دسر/)
+  assert.deepEqual(requestSequence.at(-1), {
+    method: 'DELETE',
+    path: '/api/admin/categories/44/image',
+  })
+  assert.notEqual(container.querySelector('[data-category-id="44"]'), null)
+  assert.equal(container.querySelector('[data-category-id="44"] .category-item__media img'), null)
+  assert.equal(container.querySelector('#category-editor-44 .category-image-preview img'), null)
+  assert.equal(findCategoryButton('حذف تصویر فعلی'), undefined)
+  assert.equal(
+    dom.window.document.activeElement,
+    container.querySelector('#edit-category-44-image'),
+  )
+  assert.equal(
+    revokedCategoryObjectUrls.some((objectUrl) => objectUrl.startsWith('/uploads/categories/')),
+    false,
+  )
+})
+
+test('blocks invalid category images before requests and supports safe same-file reselection', async () => {
+  const mutationRequests = []
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      return jsonResponse({ success: true, categories: [] })
+    }
+
+    mutationRequests.push({ path, options })
+    return jsonResponse({ success: true, category: {} })
+  })
+  const objectUrlStart = categoryObjectUrls.length
+  const invalidInput = container.querySelector('#create-category-image')
+  const invalidImage = new File(['not an image'], 'invalid.gif', { type: 'image/gif' })
+  const validImage = new File(['valid image'], 'coffee.png', { type: 'image/png' })
+
+  await setInputValue(container.querySelector('#create-category-name'), 'قهوه')
+  await setFileInput(invalidInput, invalidImage)
+  await settle()
+
+  const remountedInput = container.querySelector('#create-category-image')
+  assert.notEqual(remountedInput, invalidInput)
+  assert.equal(remountedInput.getAttribute('aria-invalid'), 'true')
+  assert.match(remountedInput.getAttribute('aria-describedby'), /create-category-image-error/)
+  const imageError = container.querySelector('#create-category-image-error')
+  assert.equal(imageError?.getAttribute('role'), 'alert')
+  assert.match(imageError?.textContent ?? '', /JPEG، PNG یا WebP/)
+  assert.match(imageError?.textContent ?? '', /حداکثر ۵ مگابایت/)
+
+  await act(() =>
+    remountedInput
+      .closest('form')
+      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })),
+  )
+  await settle()
+
+  assert.equal(mutationRequests.length, 0)
+  assert.equal(dom.window.document.activeElement, remountedInput)
+
+  const clearInvalidButton = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'حذف فایل نامعتبر',
+  )
+  assert.notEqual(clearInvalidButton, undefined)
+  await act(() =>
+    clearInvalidButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+
+  assert.equal(container.querySelector('#create-category-image-error'), null)
+  const clearedInvalidInput = container.querySelector('#create-category-image')
+  assert.notEqual(clearedInvalidInput, remountedInput)
+
+  await setFileInput(clearedInvalidInput, validImage)
+  await settle()
+
+  assert.equal(container.querySelector('#create-category-image-error'), null)
+  assert.equal(container.querySelector('#create-category-image').getAttribute('aria-invalid'), 'false')
+  const firstPreviewUrl = categoryObjectUrls[objectUrlStart]
+  assert.equal(
+    container.querySelector('.category-create-surface .category-image-preview img')?.src,
+    firstPreviewUrl,
+  )
+
+  const clearSelectionButton = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'حذف انتخاب',
+  )
+  await act(() =>
+    clearSelectionButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
+  )
+  await settle()
+
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === firstPreviewUrl).length,
+    1,
+  )
+  const clearedInput = container.querySelector('#create-category-image')
+  assert.notEqual(clearedInput, remountedInput)
+
+  await setFileInput(clearedInput, validImage)
+  await settle()
+
+  const repeatedPreviewUrl = categoryObjectUrls[objectUrlStart + 1]
+  assert.notEqual(repeatedPreviewUrl, firstPreviewUrl)
+  assert.equal(
+    container.querySelector('.category-create-surface .category-image-preview img')?.src,
+    repeatedPreviewUrl,
+  )
+
+  await unmountApp()
+  assert.equal(
+    revokedCategoryObjectUrls.filter((objectUrl) => objectUrl === repeatedPreviewUrl).length,
+    1,
+  )
 })
 
 test('shows category validation and safe API errors without duplicate submission', async () => {
@@ -2038,6 +2702,102 @@ test('ignores a delayed category success after logout', async () => {
   assert.equal(dom.window.location.pathname, '/admin/login')
   assert.equal(container.querySelector('.category-management'), null)
   assert.doesNotMatch(container.textContent, /stale-category/)
+})
+
+test('keeps a newer same-name category operation locked after a failed logout', async () => {
+  const firstUpdate = createControlledResponse()
+  const secondUpdate = createControlledResponse()
+  const pendingLogout = createControlledResponse()
+  const category = { id: '1', name: 'قهوه', sortOrder: 0, isVisible: true }
+  let categoryListRequests = 0
+  let categoryUpdateRequests = 0
+  const container = await mountApp('/admin/categories', async (path, options) => {
+    if (path === '/api/admin/auth/me') {
+      return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
+    }
+
+    if (path === '/api/admin/categories' && (options.method ?? 'GET') === 'GET') {
+      categoryListRequests += 1
+      return jsonResponse({ success: true, categories: [category] })
+    }
+
+    if (path === '/api/admin/categories/1' && options.method === 'PATCH') {
+      categoryUpdateRequests += 1
+
+      if (categoryUpdateRequests === 1) {
+        return firstUpdate.response
+      }
+
+      if (categoryUpdateRequests === 2) {
+        return secondUpdate.response
+      }
+
+      return jsonResponse({
+        success: true,
+        category: { ...category, isVisible: true },
+      })
+    }
+
+    if (path === '/api/admin/auth/logout') {
+      return pendingLogout.response
+    }
+
+    throw new Error('Unexpected category operation ownership request: ' + options.method + ' ' + path)
+  })
+
+  function findVisibilityButton() {
+    return container.querySelector('[data-category-id="1"] .category-visibility-button')
+  }
+
+  await act(() => findVisibilityButton().click())
+  await settle()
+  assert.equal(categoryUpdateRequests, 1)
+  assert.equal(findVisibilityButton().disabled, true)
+
+  await act(() => container.querySelector('.admin-panel__identity button').click())
+  await settle()
+  assert.equal(container.querySelector('#create-category-name').disabled, true)
+
+  pendingLogout.rejectResponse(new TypeError('private logout network detail'))
+  await settle()
+
+  assert.match(container.textContent, /نشست شما همچنان فعال است/)
+  assert.equal(categoryListRequests, 2)
+  assert.equal(findVisibilityButton().disabled, false)
+
+  await act(() => findVisibilityButton().click())
+  await settle()
+  assert.equal(categoryUpdateRequests, 2)
+  assert.equal(findVisibilityButton().disabled, true)
+
+  firstUpdate.resolveResponse(
+    jsonResponse({
+      success: true,
+      category: { ...category, isVisible: false },
+    }),
+  )
+  await settle()
+
+  assert.equal(findVisibilityButton().disabled, true)
+  assert.equal(categoryUpdateRequests, 2)
+
+  secondUpdate.resolveResponse(
+    jsonResponse({
+      success: true,
+      category: { ...category, isVisible: false },
+    }),
+  )
+  await settle()
+
+  assert.match(container.querySelector('[data-category-id="1"]').textContent, /غیرفعال/)
+  assert.equal(findVisibilityButton().disabled, false)
+
+  await act(() => findVisibilityButton().click())
+  await settle()
+
+  assert.equal(categoryUpdateRequests, 3)
+  assert.match(container.querySelector('[data-category-id="1"]').textContent, /فعال/)
+  assert.equal(findVisibilityButton().disabled, false)
 })
 
 test('keeps a category 401 authoritative over an older non-cooperative auth response', async () => {

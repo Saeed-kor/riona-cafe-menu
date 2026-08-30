@@ -84,6 +84,17 @@ function product(overrides = {}) {
   }
 }
 
+function categoryFixture(overrides = {}) {
+  return {
+    id: '9',
+    name: 'قهوه',
+    imagePath: null,
+    sortOrder: 0,
+    isVisible: true,
+    ...overrides,
+  }
+}
+
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -313,7 +324,7 @@ async function travelHistory(direction) {
   await settle()
 }
 
-function baseHandler({ products = [product()], categories = [{ id: '9', name: 'قهوه' }] } = {}) {
+function baseHandler({ products = [product()], categories = [categoryFixture()] } = {}) {
   return async (path, options = {}) => {
     if (path === '/api/admin/auth/me') {
       return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
@@ -498,7 +509,7 @@ test('presents stable Product loading, empty, and error states', async (context)
   await context.test('error state remains safe and exposes Retry', async () => {
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') return jsonResponse({ success: false, message: 'SQL private detail' }, 500)
       throw new Error(path)
     })
@@ -529,7 +540,7 @@ test('runs create, edit, replace, and confirmed delete through the real Product 
     const container = await mountApp('/admin/products', async (path, options = {}) => {
       requests.push({ path, options })
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') return jsonResponse({ success: true, products: [current] })
       if (path === '/api/admin/products' && options.method === 'POST') {
         assert.equal(options.headers, undefined)
@@ -602,7 +613,7 @@ test('shows field-specific Product errors, safe load errors, and Retry recovery'
   let productLoads = 0
   const container = await mountApp('/admin/products', async (path, options = {}) => {
     if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-    if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+    if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
     if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
       productLoads += 1
       return productLoads === 1
@@ -659,7 +670,7 @@ test('keeps Product file-input DOM, React state, and object URLs synchronized', 
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
         return jsonResponse({ success: true, products: [] })
@@ -736,7 +747,7 @@ test('keeps Product file-input DOM, React state, and object URLs synchronized', 
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
         return jsonResponse({ success: true, products: [] })
@@ -785,7 +796,7 @@ test('keeps Product file-input DOM, React state, and object URLs synchronized', 
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
         return jsonResponse({ success: true, products: [product()] })
@@ -859,7 +870,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
             return categoryLoads === 1
               ? jsonResponse({
                   success: true,
-                  categories: [{ id: '9', name: 'sensitive-category-401' }],
+                  categories: [categoryFixture({ name: 'sensitive-category-401' })],
                 })
               : pendingCategories.promise
           }
@@ -892,7 +903,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
             ? jsonResponse({ success: false }, 401)
             : jsonResponse({
                 success: true,
-                categories: [{ id: '9', name: 'stale-category-success' }],
+                categories: [categoryFixture({ name: 'stale-category-success' })],
               }))
           pendingProducts.resolve(failingPath === '/api/admin/products'
             ? jsonResponse({ success: false }, 401)
@@ -930,7 +941,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
         if (path === '/api/admin/categories') {
           categoryLoads += 1
           return categoryLoads === 1
-            ? jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+            ? jsonResponse({ success: true, categories: [categoryFixture()] })
             : pendingCategories.promise
         }
         if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
@@ -986,7 +997,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products') return pendingProduct.promise
       throw new Error(path)
@@ -1011,7 +1022,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products') return pendingProduct.promise
       throw new Error(path)
@@ -1084,7 +1095,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
         if (path === '/api/admin/categories') {
           categoryLoads += 1
           return categoryLoads === 1
-            ? jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+            ? jsonResponse({ success: true, categories: [categoryFixture()] })
             : pendingCategories.promise
         }
         if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
@@ -1106,7 +1117,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
       await act(async () => {
         pendingCategories.resolve(jsonResponse({
           success: true,
-          categories: [{ id: '9', name: 'stale-category' }],
+          categories: [categoryFixture({ name: 'stale-category' })],
         }))
         pendingProducts.resolve(jsonResponse({ success: false }, 500))
         await Promise.resolve()
@@ -1129,7 +1140,7 @@ test('enforces authoritative Product-load 401 ownership across mutations and aut
         return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
       }
       if (path === '/api/admin/categories') {
-        return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        return jsonResponse({ success: true, categories: [categoryFixture()] })
       }
       if (path === '/api/admin/products') {
         productLoads += 1
@@ -1156,7 +1167,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     const productLoad = deferred()
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') return productLoad.promise
       throw new Error(path)
     }, { settleAfterRender: false })
@@ -1172,7 +1183,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     const productLoad = deferred()
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') return productLoad.promise
       if (path === '/api/admin/auth/logout') return jsonResponse({ success: true })
       throw new Error(path)
@@ -1192,7 +1203,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     let loads = 0
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') {
         loads += 1
         if (loads === 1) return jsonResponse({ success: true, products: [] })
@@ -1216,7 +1227,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     const create = deferred()
     const container = await mountApp('/admin/products', async (path, options = {}) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') return jsonResponse({ success: true, products: [] })
       if (path === '/api/admin/products' && options.method === 'POST') return create.promise
       throw new Error(path)
@@ -1235,7 +1246,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     let productLoads = 0
     const container = await mountApp('/admin/products', async (path, options = {}) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
         productLoads += 1
         return productLoads === 1 ? jsonResponse({ success: true, products: [] }) : jsonResponse({ success: false }, 401)
@@ -1257,7 +1268,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     let patchCalls = 0
     const handler = async (path, options = {}) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') return jsonResponse({ success: true, products: [product()] })
       if (path === '/api/admin/products/1' && options.method === 'PATCH') {
         patchCalls += 1
@@ -1283,7 +1294,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     const replace = deferred()
     const container = await mountApp('/admin/products', async (path, options = {}) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') return jsonResponse({ success: true, products: [product()] })
       if (path === '/api/admin/products/1/image' && options.method === 'PUT') return replace.promise
       if (path === '/api/admin/auth/logout') return jsonResponse({ success: true })
@@ -1307,7 +1318,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     try {
       const container = await mountApp('/admin/products', async (path, options = {}) => {
         if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-        if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+        if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
         if (path === '/api/admin/products' && (options.method ?? 'GET') === 'GET') {
           loads += 1
           return loads === 1 ? jsonResponse({ success: true, products: [product()] }) : staleList.promise
@@ -1337,7 +1348,10 @@ test('covers all twelve Product route/session/operation race owners with non-coo
       }, { settleAfterRender: false })
       await settle()
       await resolveDeferred(delayed, delayedPath.includes('categories')
-        ? jsonResponse({ success: true, categories: [{ id: '9', name: 'stale-category' }] })
+        ? jsonResponse({
+            success: true,
+            categories: [categoryFixture({ name: 'stale-category' })],
+          })
         : jsonResponse({ success: true, products: [product({ name: 'stale-product' })] }))
       await settle()
       assert.equal(dom.window.location.pathname, '/admin/login')
@@ -1350,7 +1364,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     let productLoads = 0
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') {
         productLoads += 1
         return productLoads === 1 ? stale.promise : jsonResponse({ success: true, products: [product({ name: 'strict-fresh' })] })
@@ -1369,7 +1383,7 @@ test('covers all twelve Product route/session/operation race owners with non-coo
     let productLoads = 0
     const container = await mountApp('/admin/products', async (path) => {
       if (path === '/api/admin/auth/me') return jsonResponse({ success: true, admin: { id: '1', username: 'admin' } })
-      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [{ id: '9', name: 'قهوه' }] })
+      if (path === '/api/admin/categories') return jsonResponse({ success: true, categories: [categoryFixture()] })
       if (path === '/api/admin/products') {
         productLoads += 1
         return productLoads === 1 ? stale.promise : jsonResponse({ success: true, products: [product({ name: 'history-fresh' })] })
